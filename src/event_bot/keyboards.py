@@ -114,3 +114,39 @@ def show_me_keyboard(event_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[visibility_toggle_button(event_id, visible=False)]]
     )
+
+
+def companion_keyboard(event_id: int, to_user: int) -> InlineKeyboardMarkup:
+    """Действия с кандидатом; id остаются только внутри callback_data."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👋 Познакомиться",
+                    callback_data=f"req:send:{event_id}:{to_user}",
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Заблокировать",
+                    callback_data=f"block:add:{to_user}",
+                ),
+            ]
+        ]
+    )
+
+
+def request_response_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    """Ответ адресата на входящий запрос."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Принять",
+                    callback_data=f"req:accept:{request_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Отклонить",
+                    callback_data=f"req:reject:{request_id}",
+                ),
+            ]
+        ]
+    )

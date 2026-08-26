@@ -1,6 +1,7 @@
 # src/event_bot/handlers.py
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from openai import OpenAIError
@@ -9,24 +10,33 @@ from event_bot.db import (
     INTENT_STATUSES,
     INTENT_STATUS_LABELS,
     PARTICIPATING_STATUSES,
+    accept_connection_request,
+    block_user,
+    create_connection_request,
     find_companions,
     find_events,
     format_companion_card,
+    format_contact_message,
     format_event_card,
     format_intent_card,
+    format_request_notification,
     get_user_intent,
     get_user_intents,
     get_user_profile,
     is_open_participant,
     mark_visibility_asked,
+    reject_connection_request,
     save_intent,
     save_user_profile,
     set_intent_visibility,
+    update_user_identity,
 )
 from event_bot.keyboards import (
+    companion_keyboard,
     intent_card_keyboard,
     intent_keyboard,
     profile_keyboard,
+    request_response_keyboard,
     show_me_keyboard,
     visibility_keyboard,
 )
@@ -53,6 +63,27 @@ NOT_OPEN_TEXT = (
 )
 
 NO_COMPANIONS_TEXT = "Пока никто больше не открылся. Загляни позже."
+
+REQUEST_SENT_TEXT = "Запрос отправлен, ждём ответа"
+REQUEST_ALREADY_TEXT = "Запрос уже отправлен"
+REQUEST_LIMIT_TEXT = "На сегодня хватит. Попробуй завтра."
+USER_UNAVAILABLE_TEXT = "Этот участник сейчас недоступен."
+
+
+async def _send_message_safely(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    **kwargs: object,
+) -> bool:
+    """Шлёт фоновое уведомление и не роняет callback при ошибке Telegram."""
+    try:
+        await bot.send_message(chat_id, text, **kwargs)
+    except TelegramAPIError:
+        # Человек мог заблокировать бота. Состояние в БД уже сохранено,
+        # откатывать запрос или согласие из-за доставки нельзя.
+        return False
+    return True
 
 
 def _load_profile(user_id: int, profile_store: ProfileStore) -> Profile | None:
@@ -213,7 +244,12 @@ async def confirm_profile(
     # черновик становится подтверждённым профилем и уходит в SQLite.
     # Имя берём из Telegram: это единственное, что увидят другие участники
     profile_store.confirmed[user_id] = profile
-    save_user_profile(user_id, profile, callback.from_user.first_name)
+    save_user_profile(
+        user_id,
+        profile,
+        callback.from_user.first_name,
+        callback.from_user.username,
+    )
 
     # callback.message пустой у очень старых сообщений — отсюда проверка типа
     if isinstance(callback.message, Message):
@@ -432,5 +468,163 @@ async def show_people(
         await callback.message.answer(
             format_companion_card(companion, index),
             parse_mode=ParseMode.HTML,
+            reply_markup=companion_keyboard(event_id, companion.user_id),
         )
     await callback.answer()
+
+
+def _parse_candidate_callback(data: str | None) -> tuple[int, int] | None:
+    """Разбирает req:send:event_id:to_user."""
+    if data is None:
+        return None
+    parts = data.split(":")
+    if (
+        len(parts) != 4
+        or parts[0:2] != ["req", "send"]
+        or not parts[2].isdigit()
+        or not parts[3].isdigit()
+    ):
+        return None
+    return int(parts[2]), int(parts[3])
+
+
+@router.callback_query(F.data.startswith("req:send:"))
+async def send_connection_request(
+    callback: CallbackQuery,
+    bot: Bot,
+) -> None:
+    parsed = _parse_candidate_callback(callback.data)
+    if parsed is None:
+        await callback.answer()
+        return
+
+    event_id, to_user = parsed
+    from_user = callback.from_user.id
+    # Сохраняем актуальный username отправителя для возможного контакта,
+    # но до принятия нигде его не форматируем.
+    update_user_identity(
+        from_user,
+        callback.from_user.first_name,
+        callback.from_user.username,
+    )
+    result, request = create_connection_request(event_id, from_user, to_user)
+
+    if result == "already":
+        await callback.answer(REQUEST_ALREADY_TEXT, show_alert=True)
+        return
+    if result == "limit":
+        await callback.answer(REQUEST_LIMIT_TEXT, show_alert=True)
+        return
+    if result in ("blocked", "unavailable") or request is None:
+        await callback.answer(USER_UNAVAILABLE_TEXT, show_alert=True)
+        return
+
+    # Сначала запрос зафиксирован в БД. Если Telegram не доставит сообщение,
+    # строка остаётся pending, а обработчик всё равно завершится без падения.
+    await _send_message_safely(
+        bot,
+        request.to_user,
+        format_request_notification(request),
+        parse_mode=ParseMode.HTML,
+        reply_markup=request_response_keyboard(request.id),
+    )
+    await callback.answer(REQUEST_SENT_TEXT, show_alert=True)
+
+
+# req:send с четырьмя частями перехватывается обработчиком выше; здесь остаются
+# только req:accept:request_id и req:reject:request_id.
+@router.callback_query(F.data.startswith("req:"))
+async def resolve_connection_request(
+    callback: CallbackQuery,
+    bot: Bot,
+) -> None:
+    parsed = _parse_event_callback(callback.data)
+    if parsed is None or parsed[0] not in ("accept", "reject"):
+        await callback.answer()
+        return
+
+    action, request_id = parsed
+    user_id = callback.from_user.id
+    if action == "reject":
+        rejected = reject_connection_request(request_id, user_id)
+        if isinstance(callback.message, Message):
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except TelegramAPIError:
+                pass
+        await callback.answer(
+            "Запрос отклонён." if rejected else "Запрос уже обработан.",
+            show_alert=True,
+        )
+        # Защита отказавшего: отправителю здесь не уходит ни одного сообщения.
+        return
+
+    # Username адресата берём непосредственно из callback принятия, чтобы
+    # отдать отправителю актуальный контакт.
+    update_user_identity(
+        user_id,
+        callback.from_user.first_name,
+        callback.from_user.username,
+    )
+    result, request = accept_connection_request(request_id, user_id)
+    if result != "accepted" or request is None:
+        if isinstance(callback.message, Message):
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except TelegramAPIError:
+                pass
+        await callback.answer("Запрос уже обработан.", show_alert=True)
+        return
+
+    # Только эта ветка раскрывает контакты. Две отправки независимы:
+    # ошибка у одного пользователя не мешает доставить сообщение другому.
+    await _send_message_safely(
+        bot,
+        request.from_user,
+        format_contact_message(
+            request.to_name,
+            request.to_user,
+            request.to_username,
+            request.event_title,
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+    await _send_message_safely(
+        bot,
+        request.to_user,
+        format_contact_message(
+            request.from_name,
+            request.from_user,
+            request.from_username,
+            request.event_title,
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramAPIError:
+            pass
+    await callback.answer("Запрос принят.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("block:"))
+async def add_block(callback: CallbackQuery) -> None:
+    parsed = _parse_event_callback(callback.data)
+    if parsed is None or parsed[0] != "add":
+        await callback.answer()
+        return
+
+    _, blocked = parsed
+    if not block_user(callback.from_user.id, blocked):
+        await callback.answer(USER_UNAVAILABLE_TEXT, show_alert=True)
+        return
+
+    # Убираем действия с уже заблокированным кандидатом в текущем списке;
+    # новые списки отфильтруются симметрично запросом find_companions.
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramAPIError:
+            pass
+    await callback.answer("Пользователь заблокирован.", show_alert=True)

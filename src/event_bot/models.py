@@ -82,15 +82,31 @@ class Event(BaseModel):
 
 
 # Другой участник события — то, что видит пользователь в списке «Кто идёт».
-# Модель намеренно НЕ содержит telegram_id, username и телефон:
-# чего нет в модели, то невозможно случайно отправить в чат.
+# Username и телефон сюда намеренно не попадают. Telegram ID хранится только
+# для callback_data кнопок и не используется форматтером карточки.
 class Companion(BaseModel):
     """Открывшийся участник того же события"""
+    # Нужен только для callback_data кнопок. В текст карточки не выводится.
+    user_id: int
     name: str
     # пересечение интересов: считается относительно того, кто смотрит
     common_interests: list[str] = Field(default_factory=list)
     group_size_min: Optional[int] = None
     group_size_max: Optional[int] = None
+
+
+class ConnectionRequest(BaseModel):
+    """Запрос на знакомство с данными для служебных уведомлений"""
+    id: int
+    event_id: int
+    event_title: str
+    from_user: int
+    to_user: int
+    from_name: str
+    to_name: str
+    from_username: Optional[str] = None
+    to_username: Optional[str] = None
+    common_interests: list[str] = Field(default_factory=list)
 
 
 # Отметка + само событие: то, что возвращает db.get_user_intents

@@ -9,6 +9,7 @@ from typing import Iterator
 
 from event_bot.models import (
     Companion,
+    ConnectionRequest,
     Event,
     Profile,
     UserIntent,
@@ -27,6 +28,9 @@ MAX_EVENTS = 5
 
 # Сколько других участников показываем по кнопке «Кто идёт»
 MAX_COMPANIONS = 5
+
+# Не больше пяти новых запросов за скользящие 24 часа.
+DAILY_REQUEST_LIMIT = 5
 
 # Статусы, при которых человек считается участником события:
 # только они попадают в список «Кто идёт»
@@ -101,6 +105,8 @@ def init_db() -> None:
                 -- имя из Telegram (first_name): единственное, что показываем
                 -- другим участникам
                 name           TEXT NOT NULL DEFAULT '',
+                -- username используется только после взаимного согласия
+                username       TEXT,
                 interests      TEXT NOT NULL DEFAULT '[]',
                 avoid          TEXT NOT NULL DEFAULT '[]',
                 days           TEXT NOT NULL DEFAULT '[]',
@@ -132,6 +138,32 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            -- Запросы не удаляются после ответа: UNIQUE одновременно
+            -- обеспечивает идемпотентность и запрещает повтор после отказа.
+            CREATE TABLE IF NOT EXISTS requests (
+                id         INTEGER PRIMARY KEY,
+                event_id   INTEGER NOT NULL,
+                from_user  INTEGER NOT NULL,
+                to_user    INTEGER NOT NULL,
+                status     TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (event_id, from_user, to_user)
+            )
+            """
+        )
+        conn.execute(
+            """
+            -- Блокировка глобальна: не привязана к событию.
+            CREATE TABLE IF NOT EXISTS blocks (
+                blocker    INTEGER NOT NULL,
+                blocked    INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (blocker, blocked)
+            )
+            """
+        )
+        conn.execute(
+            """
             -- Отметки «пойду / интересно / не подходит».
             -- Составной первичный ключ = одна строка на пару
             -- пользователь + событие, поэтому повторное нажатие обновляет
@@ -154,6 +186,7 @@ def init_db() -> None:
         # поэтому новые колонки досоздаём отдельно — иначе база, сделанная
         # прошлой версией бота, останется без name и visibility_asked
         _add_column_if_missing(conn, "users", "name", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(conn, "users", "username", "TEXT")
         _add_column_if_missing(
             conn, "intents", "visibility_asked", "INTEGER NOT NULL DEFAULT 0"
         )
@@ -172,25 +205,39 @@ def init_db() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_title_date "
             "ON events(title, date)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requests_from_created "
+            "ON requests(from_user, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requests_pair_status "
+            "ON requests(from_user, to_user, status)"
+        )
 
 
-def save_user_profile(telegram_id: int, profile: Profile, name: str) -> None:
+def save_user_profile(
+    telegram_id: int,
+    profile: Profile,
+    name: str,
+    username: str | None = None,
+) -> None:
     """Сохраняет профиль пользователя (UPSERT по telegram_id).
 
-    name — first_name из Telegram: имя нужно, чтобы участнику события
-    было что показать другим.
+    name — first_name из Telegram: имя нужно для карточки участника.
+    username хранится для выдачи контакта только после принятия запроса.
     """
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO users (telegram_id, name, interests, avoid, days,
+            INSERT INTO users (telegram_id, name, username, interests, avoid, days,
                                budget_rub, group_size_min, group_size_max)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             -- UPSERT: если строка с таким telegram_id уже есть,
             -- вместо ошибки обновляем её поля (excluded — то, что пытались
             -- вставить)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 name           = excluded.name,
+                username       = excluded.username,
                 interests      = excluded.interests,
                 avoid          = excluded.avoid,
                 days           = excluded.days,
@@ -201,6 +248,7 @@ def save_user_profile(telegram_id: int, profile: Profile, name: str) -> None:
             (
                 telegram_id,
                 name,
+                username,
                 # ensure_ascii=False, чтобы в базе была кириллица,
                 # а не \u04XX
                 json.dumps(profile.interests, ensure_ascii=False),
@@ -210,6 +258,23 @@ def save_user_profile(telegram_id: int, profile: Profile, name: str) -> None:
                 profile.preferred_group_size_min,
                 profile.preferred_group_size_max,
             ),
+        )
+
+
+def update_user_identity(
+    telegram_id: int,
+    name: str,
+    username: str | None,
+) -> None:
+    """Освежает Telegram-имя у уже подтверждённого профиля."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET name = ?, username = ?
+            WHERE telegram_id = ?
+            """,
+            (name, username, telegram_id),
         )
 
 
@@ -471,7 +536,8 @@ def find_companions(
             -- Внутренний JOIN: строка в users появляется только при
             -- подтверждении профиля, поэтому человек без профиля
             -- в список не попадёт
-            SELECT u.name, u.interests, u.group_size_min, u.group_size_max
+            SELECT u.telegram_id, u.name, u.interests,
+                   u.group_size_min, u.group_size_max
             FROM intents i
             JOIN users u ON u.telegram_id = i.user_id
             WHERE i.event_id = ?
@@ -480,11 +546,35 @@ def find_companions(
               AND i.visible = 1
               -- себя самого в списке не показываем
               AND i.user_id != ?
+              -- Блокировка в любую сторону скрывает пару у обоих.
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM blocks b
+                  WHERE (b.blocker = ? AND b.blocked = i.user_id)
+                     OR (b.blocker = i.user_id AND b.blocked = ?)
+              )
+              -- Любой уже созданный исходящий запрос по этому событию
+              -- (включая отклонённый) навсегда убирает кнопку повтора.
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM requests r
+                  WHERE r.event_id = i.event_id
+                    AND r.from_user = ?
+                    AND r.to_user = i.user_id
+              )
             -- скоринга нет, нужен просто стабильный порядок
             ORDER BY i.updated_at, i.user_id
             LIMIT ?
             """,
-            (event_id, *PARTICIPATING_STATUSES, user_id, MAX_COMPANIONS),
+            (
+                event_id,
+                *PARTICIPATING_STATUSES,
+                user_id,
+                user_id,
+                user_id,
+                user_id,
+                MAX_COMPANIONS,
+            ),
         ).fetchall()
 
     # интересы смотрящего — для пересечения; регистр не важен
@@ -495,6 +585,7 @@ def find_companions(
         their_interests = json.loads(row["interests"])
         companions.append(
             Companion(
+                user_id=row["telegram_id"],
                 # у профилей, сохранённых до появления колонки name,
                 # имя пустое — тогда честно пишем «Без имени»
                 name=row["name"].strip() or UNKNOWN_NAME,
@@ -513,8 +604,7 @@ def find_companions(
 def format_companion_card(companion: Companion, index: int) -> str:
     """Карточка участника (parse_mode=HTML).
 
-    Здесь нет и не должно быть username, телефона и telegram id —
-    в модель Companion они и не попадают.
+    telegram id нужен клавиатуре, но намеренно не попадает в текст.
     """
     common = ", ".join(companion.common_interests) or "пока не совпали"
     group_size = format_group_size(
@@ -526,6 +616,261 @@ def format_companion_card(companion: Companion, index: int) -> str:
         f"👤 <b>{index}. {escape(companion.name)}</b>\n"
         f"🤝 Общие интересы: {escape(common)}\n"
         f"👥 Компания: {escape(group_size)}"
+    )
+
+
+_REQUEST_QUERY = """
+    SELECT r.id, r.event_id, r.from_user, r.to_user, r.status,
+           e.title AS event_title,
+           sender.name AS from_name,
+           sender.username AS from_username,
+           sender.interests AS from_interests,
+           recipient.name AS to_name,
+           recipient.username AS to_username,
+           recipient.interests AS to_interests
+    FROM requests r
+    JOIN events e ON e.id = r.event_id
+    JOIN users sender ON sender.telegram_id = r.from_user
+    JOIN users recipient ON recipient.telegram_id = r.to_user
+    WHERE r.id = ?
+"""
+
+
+def _row_to_connection_request(row: sqlite3.Row) -> ConnectionRequest:
+    """Строка запроса с профилями обеих сторон -> служебная модель."""
+    sender_interests = {
+        interest.lower() for interest in json.loads(row["from_interests"])
+    }
+    common_interests = [
+        interest
+        for interest in json.loads(row["to_interests"])
+        if interest.lower() in sender_interests
+    ]
+    return ConnectionRequest(
+        id=row["id"],
+        event_id=row["event_id"],
+        event_title=row["event_title"],
+        from_user=row["from_user"],
+        to_user=row["to_user"],
+        from_name=row["from_name"].strip() or UNKNOWN_NAME,
+        to_name=row["to_name"].strip() or UNKNOWN_NAME,
+        from_username=row["from_username"],
+        to_username=row["to_username"],
+        common_interests=common_interests,
+    )
+
+
+def _get_connection_request(
+    conn: sqlite3.Connection,
+    request_id: int,
+) -> ConnectionRequest | None:
+    row = conn.execute(_REQUEST_QUERY, (request_id,)).fetchone()
+    return _row_to_connection_request(row) if row is not None else None
+
+
+def create_connection_request(
+    event_id: int,
+    from_user: int,
+    to_user: int,
+) -> tuple[str, ConnectionRequest | None]:
+    """Атомарно создаёт запрос.
+
+    Результат: created / already / blocked / limit / unavailable.
+    Проверки выполняются в одной write-транзакции, поэтому два быстрых
+    нажатия не создадут две строки и не пройдут лимит одновременно.
+    """
+    if from_user == to_user:
+        return "unavailable", None
+
+    statuses = ", ".join("?" * len(PARTICIPATING_STATUSES))
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
+        existing = conn.execute(
+            """
+            SELECT id FROM requests
+            WHERE event_id = ? AND from_user = ? AND to_user = ?
+            """,
+            (event_id, from_user, to_user),
+        ).fetchone()
+        if existing is not None:
+            return "already", _get_connection_request(conn, existing["id"])
+
+        blocked = conn.execute(
+            """
+            SELECT 1 FROM blocks
+            WHERE (blocker = ? AND blocked = ?)
+               OR (blocker = ? AND blocked = ?)
+            """,
+            (from_user, to_user, to_user, from_user),
+        ).fetchone()
+        if blocked is not None:
+            return "blocked", None
+
+        # Нельзя обойти список поддельным callback: обе стороны должны быть
+        # открыты и участвовать именно в этом событии.
+        eligible = conn.execute(
+            f"""
+            SELECT 1
+            FROM intents sender
+            JOIN intents recipient ON recipient.event_id = sender.event_id
+            JOIN users su ON su.telegram_id = sender.user_id
+            JOIN users ru ON ru.telegram_id = recipient.user_id
+            WHERE sender.event_id = ?
+              AND sender.user_id = ?
+              AND recipient.user_id = ?
+              AND sender.status IN ({statuses})
+              AND recipient.status IN ({statuses})
+              AND sender.visible = 1
+              AND recipient.visible = 1
+            """,
+            (
+                event_id,
+                from_user,
+                to_user,
+                *PARTICIPATING_STATUSES,
+                *PARTICIPATING_STATUSES,
+            ),
+        ).fetchone()
+        if eligible is None:
+            return "unavailable", None
+
+        sent_last_day = conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM requests
+            WHERE from_user = ?
+              AND created_at >= datetime('now', '-24 hours')
+            """,
+            (from_user,),
+        ).fetchone()["amount"]
+        if sent_last_day >= DAILY_REQUEST_LIMIT:
+            return "limit", None
+
+        cursor = conn.execute(
+            """
+            INSERT INTO requests
+                (event_id, from_user, to_user, status, created_at)
+            VALUES (?, ?, ?, 'pending', datetime('now'))
+            """,
+            (event_id, from_user, to_user),
+        )
+        request = _get_connection_request(conn, cursor.lastrowid)
+        return "created", request
+
+
+def accept_connection_request(
+    request_id: int,
+    to_user: int,
+) -> tuple[str, ConnectionRequest | None]:
+    """Принимает только свой pending-запрос и возвращает контакты сторон."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, from_user, to_user FROM requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+        if row is None or row["to_user"] != to_user:
+            return "unavailable", None
+        if row["status"] != "pending":
+            return "already", None
+
+        blocked = conn.execute(
+            """
+            SELECT 1 FROM blocks
+            WHERE (blocker = ? AND blocked = ?)
+               OR (blocker = ? AND blocked = ?)
+            """,
+            (row["from_user"], to_user, to_user, row["from_user"]),
+        ).fetchone()
+        if blocked is not None:
+            conn.execute(
+                "UPDATE requests SET status = 'rejected' WHERE id = ?",
+                (request_id,),
+            )
+            return "already", None
+
+        conn.execute(
+            "UPDATE requests SET status = 'accepted' WHERE id = ?",
+            (request_id,),
+        )
+        return "accepted", _get_connection_request(conn, request_id)
+
+
+def reject_connection_request(request_id: int, to_user: int) -> bool:
+    """Отклоняет только свой pending-запрос; отправителю ничего не шлётся."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE requests
+            SET status = 'rejected'
+            WHERE id = ? AND to_user = ? AND status = 'pending'
+            """,
+            (request_id, to_user),
+        )
+        return cursor.rowcount > 0
+
+
+def block_user(blocker: int, blocked: int) -> bool:
+    """Блокирует глобально и отклоняет pending-запросы в обе стороны."""
+    if blocker == blocked:
+        return False
+
+    with get_connection() as conn:
+        # Не создаём блок для несуществующего пользователя из поддельного
+        # callback_data.
+        exists = conn.execute(
+            "SELECT 1 FROM users WHERE telegram_id = ?",
+            (blocked,),
+        ).fetchone()
+        if exists is None:
+            return False
+
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO blocks (blocker, blocked, created_at)
+            VALUES (?, ?, datetime('now'))
+            """,
+            (blocker, blocked),
+        )
+        conn.execute(
+            """
+            UPDATE requests
+            SET status = 'rejected'
+            WHERE status = 'pending'
+              AND ((from_user = ? AND to_user = ?)
+                OR (from_user = ? AND to_user = ?))
+            """,
+            (blocker, blocked, blocked, blocker),
+        )
+        return True
+
+
+def format_request_notification(request: ConnectionRequest) -> str:
+    """Уведомление адресату без username и Telegram ID."""
+    common = ", ".join(request.common_interests) or "пока не совпали"
+    return (
+        f"👋 <b>{escape(request.from_name)}</b> хочет познакомиться\n"
+        f"🤝 Общие интересы: {escape(common)}\n"
+        f"🎯 Событие: {escape(request.event_title)}"
+    )
+
+
+def format_contact_message(
+    name: str,
+    user_id: int,
+    username: str | None,
+    event_title: str,
+) -> str:
+    """Контакт, который формируется только после принятия запроса."""
+    if username:
+        contact = f"@{escape(username.lstrip('@'))}"
+    else:
+        contact = f'<a href="tg://user?id={user_id}">{escape(name)}</a>'
+    return (
+        "Знакомство взаимно ✅\n"
+        f"Контакт: {contact}\n"
+        f"Событие: {escape(event_title)}"
     )
 
 
