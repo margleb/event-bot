@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .env
 .venv/
+
+# Local database
+data/
