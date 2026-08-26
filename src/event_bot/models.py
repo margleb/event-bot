@@ -5,6 +5,21 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+def format_group_size(minimum: int | None, maximum: int | None) -> str:
+    """«2–4», «от 2», «до 4» или «не указан».
+
+    Живёт здесь, потому что нужен в двух местах: в профиле
+    (profile_service) и в карточке участника (db).
+    """
+    if minimum is not None and maximum is not None:
+        return f"{minimum}–{maximum}"
+    if minimum is not None:
+        return f"от {minimum}"
+    if maximum is not None:
+        return f"до {maximum}"
+    return "не указан"
+
+
 # Модели Pydantic здесь работают в двух ролях: это и схема ответа
 # для OpenAI (structured output), и обычные объекты для передачи данных.
 # description у полей видит модель — это часть промпта.
@@ -66,9 +81,23 @@ class Event(BaseModel):
         return f"{low}–{high} ₽"
 
 
+# Другой участник события — то, что видит пользователь в списке «Кто идёт».
+# Модель намеренно НЕ содержит telegram_id, username и телефон:
+# чего нет в модели, то невозможно случайно отправить в чат.
+class Companion(BaseModel):
+    """Открывшийся участник того же события"""
+    name: str
+    # пересечение интересов: считается относительно того, кто смотрит
+    common_interests: list[str] = Field(default_factory=list)
+    group_size_min: Optional[int] = None
+    group_size_max: Optional[int] = None
+
+
 # Отметка + само событие: то, что возвращает db.get_user_intents
 class UserIntent(BaseModel):
     """Отметка пользователя по конкретному мероприятию"""
     event: Event
     status: str
     visible: bool = False
+    # спрашивали ли уже согласие на видимость по этому событию
+    visibility_asked: bool = False

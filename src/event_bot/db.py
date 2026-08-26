@@ -7,7 +7,13 @@ from html import escape
 from pathlib import Path
 from typing import Iterator
 
-from event_bot.models import Event, Profile, UserIntent
+from event_bot.models import (
+    Companion,
+    Event,
+    Profile,
+    UserIntent,
+    format_group_size,
+)
 
 # Файл базы лежит в data/ в корне проекта: три parent — это
 # db.py -> event_bot -> src -> корень
@@ -18,6 +24,16 @@ DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Сколько карточек максимум отправляем за один /find
 MAX_EVENTS = 5
+
+# Сколько других участников показываем по кнопке «Кто идёт»
+MAX_COMPANIONS = 5
+
+# Статусы, при которых человек считается участником события:
+# только они попадают в список «Кто идёт»
+PARTICIPATING_STATUSES = ("interested", "going")
+
+# Показываем, если профиль сохранён до появления колонки name
+UNKNOWN_NAME = "Без имени"
 
 # Допустимые статусы отметки: то, что приходит из callback_data,
 # сверяется с этим списком перед записью в базу
@@ -55,6 +71,19 @@ def get_connection(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    """Добавляет колонку, если её ещё нет: простая миграция старых баз."""
+    # PRAGMA table_info возвращает описание всех колонок таблицы
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
     """Создаёт таблицы и индексы, если их ещё нет.
 
@@ -69,6 +98,9 @@ def init_db() -> None:
             -- нет типа «массив», а отдельная таблица тут избыточна.
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id    INTEGER PRIMARY KEY,
+                -- имя из Telegram (first_name): единственное, что показываем
+                -- другим участникам
+                name           TEXT NOT NULL DEFAULT '',
                 interests      TEXT NOT NULL DEFAULT '[]',
                 avoid          TEXT NOT NULL DEFAULT '[]',
                 days           TEXT NOT NULL DEFAULT '[]',
@@ -110,11 +142,22 @@ def init_db() -> None:
                 status     TEXT NOT NULL,
                 -- согласие показывать себя другим; по умолчанию 0
                 visible    INTEGER NOT NULL DEFAULT 0,
+                -- спрашивали ли уже про видимость по этому событию:
+                -- вопрос задаётся один раз, дальше — кнопка-переключатель
+                visibility_asked INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (user_id, event_id)
             )
             """
         )
+        # CREATE TABLE IF NOT EXISTS не трогает уже существующую таблицу,
+        # поэтому новые колонки досоздаём отдельно — иначе база, сделанная
+        # прошлой версией бота, останется без name и visibility_asked
+        _add_column_if_missing(conn, "users", "name", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(
+            conn, "intents", "visibility_asked", "INTEGER NOT NULL DEFAULT 0"
+        )
+
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id "
             "ON users(telegram_id)"
@@ -131,18 +174,23 @@ def init_db() -> None:
         )
 
 
-def save_user_profile(telegram_id: int, profile: Profile) -> None:
-    """Сохраняет профиль пользователя (UPSERT по telegram_id)."""
+def save_user_profile(telegram_id: int, profile: Profile, name: str) -> None:
+    """Сохраняет профиль пользователя (UPSERT по telegram_id).
+
+    name — first_name из Telegram: имя нужно, чтобы участнику события
+    было что показать другим.
+    """
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO users (telegram_id, interests, avoid, days,
+            INSERT INTO users (telegram_id, name, interests, avoid, days,
                                budget_rub, group_size_min, group_size_max)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             -- UPSERT: если строка с таким telegram_id уже есть,
             -- вместо ошибки обновляем её поля (excluded — то, что пытались
             -- вставить)
             ON CONFLICT(telegram_id) DO UPDATE SET
+                name           = excluded.name,
                 interests      = excluded.interests,
                 avoid          = excluded.avoid,
                 days           = excluded.days,
@@ -152,6 +200,7 @@ def save_user_profile(telegram_id: int, profile: Profile) -> None:
             """,
             (
                 telegram_id,
+                name,
                 # ensure_ascii=False, чтобы в базе была кириллица,
                 # а не \u04XX
                 json.dumps(profile.interests, ensure_ascii=False),
@@ -313,32 +362,63 @@ def set_intent_visibility(user_id: int, event_id: int, visible: bool) -> bool:
         return cursor.rowcount > 0
 
 
+# Общая часть запросов об отметках: JOIN подтягивает к отметке данные
+# события, поэтому одним запросом получаем и статус, и название с датой
+_INTENTS_QUERY = """
+    SELECT e.*, i.status, i.visible, i.visibility_asked
+    FROM intents i
+    JOIN events e ON e.id = i.event_id
+    WHERE i.user_id = ?
+"""
+
+
+def _row_to_intent(row: sqlite3.Row) -> UserIntent:
+    """Строка запроса выше -> модель UserIntent."""
+    return UserIntent(
+        # в row лежат и колонки события, и статус с видимостью
+        event=_row_to_event(row),
+        status=row["status"],
+        # 1/0 из SQLite обратно в True/False
+        visible=bool(row["visible"]),
+        visibility_asked=bool(row["visibility_asked"]),
+    )
+
+
 def get_user_intents(user_id: int) -> list[UserIntent]:
     """Отметки пользователя вместе с событиями, ближайшие сверху."""
     with get_connection() as conn:
         rows = conn.execute(
-            """
-            -- JOIN подтягивает к отметке данные события: одним запросом
-            -- получаем и статус, и название с датой
-            SELECT e.*, i.status, i.visible
-            FROM intents i
-            JOIN events e ON e.id = i.event_id
-            WHERE i.user_id = ?
-            ORDER BY e.date
-            """,
-            (user_id,),
+            _INTENTS_QUERY + " ORDER BY e.date", (user_id,)
         ).fetchall()
 
-    return [
-        UserIntent(
-            # в row лежат и колонки события, и статус с видимостью
-            event=_row_to_event(row),
-            status=row["status"],
-            # 1/0 из SQLite обратно в True/False
-            visible=bool(row["visible"]),
+    return [_row_to_intent(row) for row in rows]
+
+
+def get_user_intent(user_id: int, event_id: int) -> UserIntent | None:
+    """Одна отметка пользователя по конкретному событию.
+
+    Нужна, чтобы перерисовать карточку после переключения видимости
+    и чтобы проверить право смотреть список участников.
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            _INTENTS_QUERY + " AND i.event_id = ?", (user_id, event_id)
+        ).fetchone()
+
+    return _row_to_intent(row) if row is not None else None
+
+
+def mark_visibility_asked(user_id: int, event_id: int) -> None:
+    """Помечает, что про видимость по этому событию уже спрашивали."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE intents
+            SET visibility_asked = 1
+            WHERE user_id = ? AND event_id = ?
+            """,
+            (user_id, event_id),
         )
-        for row in rows
-    ]
 
 
 def format_intent_card(intent: UserIntent) -> str:
@@ -354,6 +434,98 @@ def format_intent_card(intent: UserIntent) -> str:
         f"🎯 <b>{escape(event.title)}</b>\n"
         f"📅 {event.date.strftime('%d.%m.%Y %H:%M')} ({weekday})\n"
         f"👀 {status} · {visibility}"
+    )
+
+
+def is_open_participant(intent: UserIntent | None) -> bool:
+    """Открылся ли человек на этом событии.
+
+    Ровно тот же критерий, по которому люди попадают в список «Кто идёт».
+    Одна функция на оба случая = правило взаимности: видит список только
+    тот, кого в этом списке видят другие.
+    """
+    return (
+        intent is not None
+        and intent.status in PARTICIPATING_STATUSES
+        and intent.visible
+    )
+
+
+def find_companions(
+    event_id: int,
+    user_id: int,
+    profile: Profile,
+) -> list[Companion]:
+    """Другие открывшиеся участники события.
+
+    Право смотреть список проверяется отдельно (is_open_participant),
+    здесь только выборка. profile нужен, чтобы посчитать общие интересы
+    относительно того, кто смотрит.
+    """
+    # плейсхолдеры под IN (...) строим по числу статусов
+    statuses = ", ".join("?" * len(PARTICIPATING_STATUSES))
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            -- Внутренний JOIN: строка в users появляется только при
+            -- подтверждении профиля, поэтому человек без профиля
+            -- в список не попадёт
+            SELECT u.name, u.interests, u.group_size_min, u.group_size_max
+            FROM intents i
+            JOIN users u ON u.telegram_id = i.user_id
+            WHERE i.event_id = ?
+              AND i.status IN ({statuses})
+              -- показываем только тех, кто сам разрешил себя показывать
+              AND i.visible = 1
+              -- себя самого в списке не показываем
+              AND i.user_id != ?
+            -- скоринга нет, нужен просто стабильный порядок
+            ORDER BY i.updated_at, i.user_id
+            LIMIT ?
+            """,
+            (event_id, *PARTICIPATING_STATUSES, user_id, MAX_COMPANIONS),
+        ).fetchall()
+
+    # интересы смотрящего — для пересечения; регистр не важен
+    mine = {interest.lower() for interest in profile.interests}
+
+    companions = []
+    for row in rows:
+        their_interests = json.loads(row["interests"])
+        companions.append(
+            Companion(
+                # у профилей, сохранённых до появления колонки name,
+                # имя пустое — тогда честно пишем «Без имени»
+                name=row["name"].strip() or UNKNOWN_NAME,
+                common_interests=[
+                    interest
+                    for interest in their_interests
+                    if interest.lower() in mine
+                ],
+                group_size_min=row["group_size_min"],
+                group_size_max=row["group_size_max"],
+            )
+        )
+    return companions
+
+
+def format_companion_card(companion: Companion, index: int) -> str:
+    """Карточка участника (parse_mode=HTML).
+
+    Здесь нет и не должно быть username, телефона и telegram id —
+    в модель Companion они и не попадают.
+    """
+    common = ", ".join(companion.common_interests) or "пока не совпали"
+    group_size = format_group_size(
+        companion.group_size_min,
+        companion.group_size_max,
+    )
+
+    return (
+        f"👤 <b>{index}. {escape(companion.name)}</b>\n"
+        f"🤝 Общие интересы: {escape(common)}\n"
+        f"👥 Компания: {escape(group_size)}"
     )
 
 

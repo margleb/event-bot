@@ -1,6 +1,6 @@
 from openai import AsyncOpenAI
 
-from event_bot.models import Profile
+from event_bot.models import Profile, format_group_size
 
 
 PROFILE_EXTRACTION_INSTRUCTIONS = (
@@ -46,16 +46,11 @@ def format_profile(profile: Profile) -> str:
         else "не указан"
     )
 
-    minimum = profile.preferred_group_size_min
-    maximum = profile.preferred_group_size_max
-    if minimum is not None and maximum is not None:
-        group_size = f"{minimum}–{maximum}"
-    elif minimum is not None:
-        group_size = f"от {minimum}"
-    elif maximum is not None:
-        group_size = f"до {maximum}"
-    else:
-        group_size = "не указан"
+    # тот же формат, что и в карточке участника события
+    group_size = format_group_size(
+        profile.preferred_group_size_min,
+        profile.preferred_group_size_max,
+    )
 
     return (
         "Я понял так:\n\n"

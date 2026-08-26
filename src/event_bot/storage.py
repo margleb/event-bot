@@ -12,7 +12,6 @@ class ProfileStore:
     """
 
     # распознанные, но ещё не подтверждённые профили
-
     drafts: dict[int, Profile] = field(default_factory=dict)
     # подтверждённые кнопкой «Верно»; они же лежат в таблице users
     confirmed: dict[int, Profile] = field(default_factory=dict)

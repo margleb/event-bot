@@ -44,8 +44,34 @@ def intent_keyboard(event_id: int) -> InlineKeyboardMarkup:
                     text="🚫 Не подходит",
                     callback_data=f"intent:not_going:{event_id}",
                 ),
-            ]
+            ],
+            # вторая строка клавиатуры
+            [people_button(event_id)],
         ]
+    )
+
+
+def people_button(event_id: int) -> InlineKeyboardButton:
+    """Кнопка «Кто идёт» — она нужна и под карточкой события, и в /my."""
+    return InlineKeyboardButton(
+        text="👥 Кто идёт",
+        callback_data=f"people:list:{event_id}",
+    )
+
+
+def visibility_toggle_button(event_id: int, visible: bool) -> InlineKeyboardButton:
+    """Переключатель видимости: показывает действие, а не текущее состояние.
+
+    Видно сейчас — предлагаем скрыться, и наоборот.
+    """
+    if visible:
+        return InlineKeyboardButton(
+            text="🙈 Скрыть меня",
+            callback_data=f"toggle:hide:{event_id}",
+        )
+    return InlineKeyboardButton(
+        text="👀 Показывать меня",
+        callback_data=f"toggle:show:{event_id}",
     )
 
 
@@ -67,19 +93,24 @@ def visibility_keyboard(event_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def hide_me_keyboard(event_id: int) -> InlineKeyboardMarkup:
-    """Кнопка под элементом /my.
+def intent_card_keyboard(event_id: int, visible: bool) -> InlineKeyboardMarkup:
+    """Кнопки под карточкой отметки: переключатель видимости и «Кто идёт».
 
-    Шлёт тот же visible:no, что и ответ «Нет» — отдельный
-    обработчик не нужен.
+    Используется в /my и вместо повторного вопроса о видимости.
     """
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🙈 Скрыть меня",
-                    callback_data=f"visible:no:{event_id}",
-                ),
-            ]
+            [visibility_toggle_button(event_id, visible)],
+            [people_button(event_id)],
         ]
+    )
+
+
+def show_me_keyboard(event_id: int) -> InlineKeyboardMarkup:
+    """Единственная кнопка «Показывать меня».
+
+    Показывается вместо списка участников тому, кто сам ещё не открылся.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[visibility_toggle_button(event_id, visible=False)]]
     )

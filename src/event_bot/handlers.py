@@ -8,19 +8,26 @@ from openai import OpenAIError
 from event_bot.db import (
     INTENT_STATUSES,
     INTENT_STATUS_LABELS,
+    PARTICIPATING_STATUSES,
+    find_companions,
     find_events,
+    format_companion_card,
     format_event_card,
     format_intent_card,
+    get_user_intent,
     get_user_intents,
     get_user_profile,
+    is_open_participant,
+    mark_visibility_asked,
     save_intent,
     save_user_profile,
     set_intent_visibility,
 )
 from event_bot.keyboards import (
-    hide_me_keyboard,
+    intent_card_keyboard,
     intent_keyboard,
     profile_keyboard,
+    show_me_keyboard,
     visibility_keyboard,
 )
 from event_bot.models import Profile
@@ -37,6 +44,15 @@ NO_PROFILE_TEXT = (
     "Профиля пока нет. Расскажи, что тебе интересно, "
     "когда удобно ходить и какой бюджет — я его соберу."
 )
+
+# Показывается вместо списка тому, кто сам ещё не открылся:
+# смотреть на других, оставаясь невидимым, нельзя
+NOT_OPEN_TEXT = (
+    "Список видят только те, кто открылся сам.\n"
+    "Показывать тебя другим на этом событии?"
+)
+
+NO_COMPANIONS_TEXT = "Пока никто больше не открылся. Загляни позже."
 
 
 def _load_profile(user_id: int, profile_store: ProfileStore) -> Profile | None:
@@ -142,9 +158,11 @@ async def my_events(message: Message) -> None:
         await message.answer(
             format_intent_card(intent),
             parse_mode=ParseMode.HTML,
-            # кнопку «Скрыть меня» показываем, только если сейчас видно
+            # у «Не подходит» переключать и смотреть нечего — кнопок нет
             reply_markup=(
-                hide_me_keyboard(intent.event.id) if intent.visible else None
+                intent_card_keyboard(intent.event.id, intent.visible)
+                if intent.status in PARTICIPATING_STATUSES
+                else None
             ),
         )
 
@@ -192,9 +210,10 @@ async def confirm_profile(
         )
         return
 
-    # черновик становится подтверждённым профилем и уходит в SQLite
+    # черновик становится подтверждённым профилем и уходит в SQLite.
+    # Имя берём из Telegram: это единственное, что увидят другие участники
     profile_store.confirmed[user_id] = profile
-    save_user_profile(user_id, profile)
+    save_user_profile(user_id, profile, callback.from_user.first_name)
 
     # callback.message пустой у очень старых сообщений — отсюда проверка типа
     if isinstance(callback.message, Message):
@@ -242,7 +261,10 @@ def _parse_event_callback(data: str | None) -> tuple[str, int] | None:
 
 # Нажатие «Интересно» / «Иду» / «Не подходит» под карточкой события
 @router.callback_query(F.data.startswith("intent:"))
-async def set_intent(callback: CallbackQuery) -> None:
+async def set_intent(
+    callback: CallbackQuery,
+    profile_store: ProfileStore,
+) -> None:
     parsed = _parse_event_callback(callback.data)
     # статус сверяем со списком допустимых, чтобы в базу не попал мусор
     if parsed is None or parsed[0] not in INTENT_STATUSES:
@@ -250,8 +272,18 @@ async def set_intent(callback: CallbackQuery) -> None:
         return
 
     status, event_id = parsed
+    user_id = callback.from_user.id
+
+    # Без подтверждённого профиля отметка не сохраняется: иначе человек
+    # окажется участником, которого нечем показать другим
+    if _load_profile(user_id, profile_store) is None:
+        await callback.answer("Сначала заполни профиль.", show_alert=True)
+        if isinstance(callback.message, Message):
+            await callback.message.answer(NO_PROFILE_TEXT)
+        return
+
     # сохраняет отметку пользователя (UPSERT: повторное нажатие обновит строку)
-    save_intent(callback.from_user.id, event_id, status)
+    save_intent(user_id, event_id, status)
     # короткое всплывающее уведомление вместо отдельного сообщения в чате
     await callback.answer(f"Отметил: {INTENT_STATUS_LABELS[status]}")
 
@@ -260,6 +292,22 @@ async def set_intent(callback: CallbackQuery) -> None:
     if status == "not_going" or not isinstance(callback.message, Message):
         return
 
+    intent = get_user_intent(user_id, event_id)
+    if intent is None:
+        return
+
+    if intent.visibility_asked:
+        # вопрос по этому событию уже задавали — больше не спрашиваем,
+        # вместо него показываем состояние и кнопку-переключатель
+        await callback.message.answer(
+            format_intent_card(intent),
+            parse_mode=ParseMode.HTML,
+            reply_markup=intent_card_keyboard(event_id, intent.visible),
+        )
+        return
+
+    # спрашиваем один раз и сразу помечаем, что спросили
+    mark_visibility_asked(user_id, event_id)
     # именно ОТДЕЛЬНОЕ сообщение: согласие не приклеено к выбору статуса
     await callback.message.answer(
         "Показывать вас другим, кто собирается на это событие?",
@@ -294,3 +342,95 @@ async def set_visibility(callback: CallbackQuery) -> None:
     await callback.answer(
         "Показываю тебя другим." if visible else "Не показываю тебя другим."
     )
+
+
+# Переключатель «Показывать меня» / «Скрыть меня»: в /my, вместо повторного
+# вопроса и в предложении открыться. В отличие от ответа «Да»/«Нет» он
+# перерисовывает и текст сообщения, а не только кнопки
+@router.callback_query(F.data.startswith("toggle:"))
+async def toggle_visibility(callback: CallbackQuery) -> None:
+    parsed = _parse_event_callback(callback.data)
+    if parsed is None or parsed[0] not in ("show", "hide"):
+        await callback.answer()
+        return
+
+    action, event_id = parsed
+    user_id = callback.from_user.id
+    visible = action == "show"
+
+    if not set_intent_visibility(user_id, event_id, visible):
+        await callback.answer(
+            "Сначала отметь, идёшь ли ты на это событие.",
+            show_alert=True,
+        )
+        return
+
+    # перечитываем отметку, чтобы показать реальное состояние из базы
+    intent = get_user_intent(user_id, event_id)
+    if isinstance(callback.message, Message) and intent is not None:
+        await callback.message.edit_text(
+            format_intent_card(intent),
+            parse_mode=ParseMode.HTML,
+            reply_markup=intent_card_keyboard(event_id, intent.visible),
+        )
+    await callback.answer(
+        "Показываю тебя другим." if visible else "Не показываю тебя другим."
+    )
+
+
+# Кнопка «Кто идёт»
+@router.callback_query(F.data.startswith("people:"))
+async def show_people(
+    callback: CallbackQuery,
+    profile_store: ProfileStore,
+) -> None:
+    parsed = _parse_event_callback(callback.data)
+    if parsed is None or parsed[0] != "list":
+        await callback.answer()
+        return
+
+    _, event_id = parsed
+    user_id = callback.from_user.id
+
+    profile = _load_profile(user_id, profile_store)
+    if profile is None:
+        await callback.answer("Сначала заполни профиль.", show_alert=True)
+        return
+
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+
+    intent = get_user_intent(user_id, event_id)
+    if intent is None or intent.status not in PARTICIPATING_STATUSES:
+        await callback.answer(
+            "Сначала отметь «Интересно» или «Иду».",
+            show_alert=True,
+        )
+        return
+
+    # ПРАВИЛО ВЗАИМНОСТИ: список видит только тот, кто сам открылся.
+    # Проверка — той же функцией, по которой людей отбирают в список,
+    # поэтому наблюдателей, которых не видно самих, не бывает
+    if not is_open_participant(intent):
+        await callback.message.answer(
+            NOT_OPEN_TEXT,
+            reply_markup=show_me_keyboard(event_id),
+        )
+        await callback.answer()
+        return
+
+    companions = find_companions(event_id, user_id, profile)
+    if not companions:
+        # ничего не выдумываем: пусто — значит пусто
+        await callback.message.answer(NO_COMPANIONS_TEXT)
+        await callback.answer()
+        return
+
+    await callback.message.answer(f"Открылись {len(companions)}:")
+    for index, companion in enumerate(companions, start=1):
+        await callback.message.answer(
+            format_companion_card(companion, index),
+            parse_mode=ParseMode.HTML,
+        )
+    await callback.answer()
