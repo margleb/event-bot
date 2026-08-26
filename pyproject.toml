@@ -1,0 +1,22 @@
+[project]
+name = "event-bot"
+version = "0.1.0"
+description = "Telegram bot for collecting event preferences"
+readme = "README.md"
+authors = [
+    { name = "margleb", email = "margleb.dm@yandex.ru" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.30.0",
+    "openai>=3.3.1",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+event-bot = "event_bot:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
