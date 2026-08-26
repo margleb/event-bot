@@ -17,6 +17,9 @@ class ProfileExtractor:
         self._client = client
 
     async def extract(self, text: str) -> Profile:
+        """Свободный текст пользователя -> заполненная модель Profile."""
+        # responses.parse со schema из Pydantic-модели: модель обязана
+        # вернуть JSON нужной структуры, руками его парсить не нужно
         response = await self._client.responses.parse(
             model="gpt-4o-2024-08-06",
             instructions=PROFILE_EXTRACTION_INSTRUCTIONS,
@@ -24,6 +27,7 @@ class ProfileExtractor:
             text_format=Profile,
         )
 
+        # None бывает, если модель отказалась отвечать или ответ обрезан
         if response.output_parsed is None:
             raise ValueError("OpenAI не вернул распознанный профиль")
 
@@ -31,6 +35,8 @@ class ProfileExtractor:
 
 
 def format_profile(profile: Profile) -> str:
+    """Профиль -> текст для подтверждения пользователем."""
+    # у незаполненных полей показываем «не указано», а не пустоту
     interests = ", ".join(profile.interests) or "не указаны"
     avoid = ", ".join(profile.avoid) or "не указано"
     days = ", ".join(profile.days) if profile.days else "не указаны"

@@ -5,6 +5,9 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+# Модели Pydantic здесь работают в двух ролях: это и схема ответа
+# для OpenAI (structured output), и обычные объекты для передачи данных.
+# description у полей видит модель — это часть промпта.
 class Profile(BaseModel):
     """Профиль пользователя"""
     interests: list[str] = Field(
@@ -35,6 +38,8 @@ class Profile(BaseModel):
 
 class Event(BaseModel):
     """Мероприятие"""
+    # None у события, которое ещё не сохранено в базу;
+    # у прочитанного из SQLite id всегда есть
     id: Optional[int] = None
     title: str
     description: str
@@ -48,6 +53,7 @@ class Event(BaseModel):
 
     def get_price_display(self) -> str:
         """Человекочитаемая цена. 0 и None трактуются как «бесплатно»."""
+        # `or 0` схлопывает None и 0 в один случай
         low = self.price_min or 0
         high = self.price_max or 0
 
@@ -58,3 +64,11 @@ class Event(BaseModel):
         if high == 0 or high == low:
             return f"{low} ₽"
         return f"{low}–{high} ₽"
+
+
+# Отметка + само событие: то, что возвращает db.get_user_intents
+class UserIntent(BaseModel):
+    """Отметка пользователя по конкретному мероприятию"""
+    event: Event
+    status: str
+    visible: bool = False

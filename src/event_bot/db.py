@@ -7,14 +7,28 @@ from html import escape
 from pathlib import Path
 from typing import Iterator
 
-from event_bot.models import Event, Profile
+from event_bot.models import Event, Profile, UserIntent
 
+# Файл базы лежит в data/ в корне проекта: три parent — это
+# db.py -> event_bot -> src -> корень
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "bot.db"
 
 # Формат, в котором даты лежат в SQLite: он сравним с datetime('now')
 DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# Сколько карточек максимум отправляем за один /find
 MAX_EVENTS = 5
+
+# Допустимые статусы отметки: то, что приходит из callback_data,
+# сверяется с этим списком перед записью в базу
+INTENT_STATUSES = ("interested", "going", "not_going")
+
+# Подписи статусов для сообщений бота
+INTENT_STATUS_LABELS = {
+    "interested": "интересно",
+    "going": "иду",
+    "not_going": "не подходит",
+}
 
 WEEKDAYS_RU = ("понедельник", "вторник", "среда", "четверг",
                "пятница", "суббота", "воскресенье")
@@ -24,13 +38,17 @@ WEEKDAYS_RU = ("понедельник", "вторник", "среда", "чет
 def get_connection(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
     """Соединение с SQLite: коммитит при успехе, откатывает при ошибке."""
     db_path = db_path or DB_PATH
+    # каталог data/ может отсутствовать при первом запуске
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    # с этой строкой строки результата ведут себя как словарь: row["title"]
     conn.row_factory = sqlite3.Row
     try:
+        # тело with выполняется здесь; вернулись без ошибки — сохраняем
         yield conn
         conn.commit()
     except Exception:
+        # любая ошибка внутри with откатывает всё, что успели записать
         conn.rollback()
         raise
     finally:
@@ -38,10 +56,17 @@ def get_connection(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def init_db() -> None:
-    """Создаёт таблицы и индексы, если их ещё нет."""
+    """Создаёт таблицы и индексы, если их ещё нет.
+
+    Вызывается при каждом старте бота (app.py): IF NOT EXISTS делает
+    повторный вызов безопасным, данные не теряются.
+    """
     with get_connection() as conn:
         conn.execute(
             """
+            -- Профили: одна строка на пользователя.
+            -- Списки (интересы, дни) хранятся строкой JSON — в SQLite
+            -- нет типа «массив», а отдельная таблица тут избыточна.
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id    INTEGER PRIMARY KEY,
                 interests      TEXT NOT NULL DEFAULT '[]',
@@ -56,6 +81,8 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            -- Мероприятия. date хранится текстом "ГГГГ-ММ-ДД ЧЧ:ММ:СС",
+            -- такой формат корректно сравнивается с datetime('now')
             CREATE TABLE IF NOT EXISTS events (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 title       TEXT NOT NULL,
@@ -72,6 +99,23 @@ def init_db() -> None:
             """
         )
         conn.execute(
+            """
+            -- Отметки «пойду / интересно / не подходит».
+            -- Составной первичный ключ = одна строка на пару
+            -- пользователь + событие, поэтому повторное нажатие обновляет
+            -- существующую запись, а не плодит новые.
+            CREATE TABLE IF NOT EXISTS intents (
+                user_id    INTEGER NOT NULL,
+                event_id   INTEGER NOT NULL,
+                status     TEXT NOT NULL,
+                -- согласие показывать себя другим; по умолчанию 0
+                visible    INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, event_id)
+            )
+            """
+        )
+        conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id "
             "ON users(telegram_id)"
         )
@@ -79,6 +123,8 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_events_city_date "
             "ON events(city, date)"
         )
+        # Уникальность «название + дата» защищает от дублей при повторном
+        # наполнении демо-данными: INSERT OR IGNORE опирается на этот индекс
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_title_date "
             "ON events(title, date)"
@@ -93,6 +139,9 @@ def save_user_profile(telegram_id: int, profile: Profile) -> None:
             INSERT INTO users (telegram_id, interests, avoid, days,
                                budget_rub, group_size_min, group_size_max)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            -- UPSERT: если строка с таким telegram_id уже есть,
+            -- вместо ошибки обновляем её поля (excluded — то, что пытались
+            -- вставить)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 interests      = excluded.interests,
                 avoid          = excluded.avoid,
@@ -103,6 +152,8 @@ def save_user_profile(telegram_id: int, profile: Profile) -> None:
             """,
             (
                 telegram_id,
+                # ensure_ascii=False, чтобы в базе была кириллица,
+                # а не \u04XX
                 json.dumps(profile.interests, ensure_ascii=False),
                 json.dumps(profile.avoid, ensure_ascii=False),
                 json.dumps(profile.days or [], ensure_ascii=False),
@@ -123,6 +174,7 @@ def get_user_profile(telegram_id: int) -> Profile | None:
     if row is None:
         return None
 
+    # обратное преобразование: строки JSON -> списки Python
     return Profile(
         interests=json.loads(row["interests"]),
         avoid=json.loads(row["avoid"]),
@@ -134,6 +186,7 @@ def get_user_profile(telegram_id: int) -> Profile | None:
 
 
 def _row_to_event(row: sqlite3.Row) -> Event:
+    """Строка таблицы events -> модель Event."""
     return Event(
         id=row["id"],
         title=row["title"],
@@ -149,31 +202,41 @@ def _row_to_event(row: sqlite3.Row) -> Event:
 
 
 def _score(event: Event, interests: set[str], avoid: set[str]) -> int:
+    """Насколько событие подходит: совпадения тегов минус нежелательные."""
     tags = {tag.lower() for tag in event.tags}
+    # & — пересечение множеств, то есть общие теги
     return len(interests & tags) - len(avoid & tags)
 
 
 def find_events(profile: Profile) -> list[Event]:
     """Подбирает до 5 будущих московских мероприятий под профиль."""
+    # Запрос собираем по частям: условие по бюджету добавляется,
+    # только если бюджет вообще указан в профиле
     query = [
         "SELECT * FROM events",
+        # только будущие события
         "WHERE city = 'Москва' AND date > datetime('now', 'localtime')",
     ]
     params: list[object] = []
 
     if profile.budget_rub is not None:
+        # цена не выше бюджета; 0 и NULL означают «бесплатно»
         query.append(
             "AND COALESCE(price_min, 0) <= ?"
             " AND (price_max <= ? OR price_max IS NULL OR price_max = 0)"
         )
+        # значения подставляются через ?, а не форматированием строки —
+        # так не бывает SQL-инъекций
         params.extend([profile.budget_rub, profile.budget_rub])
 
     with get_connection() as conn:
         rows = conn.execute(" ".join(query), params).fetchall()
 
+    # приводим к нижнему регистру, чтобы «Музыка» и «музыка» совпали
     interests = {tag.lower() for tag in profile.interests}
     avoid = {tag.lower() for tag in profile.avoid}
 
+    # ранжирование делаем в Python: score считать в SQL здесь неудобно
     events = [_row_to_event(row) for row in rows]
     # При равном score показываем то, что раньше по дате
     events.sort(key=lambda e: (-_score(e, interests, avoid), e.date))
@@ -182,10 +245,13 @@ def find_events(profile: Profile) -> list[Event]:
 
 def format_event_card(event: Event, index: int) -> str:
     """Карточка мероприятия для отправки в Telegram (parse_mode=HTML)."""
+    # weekday(): 0 — понедельник, отсюда порядок в WEEKDAYS_RU
     weekday = WEEKDAYS_RU[event.date.weekday()]
     when = f"{event.date.strftime('%d.%m.%Y %H:%M')} ({weekday})"
     tags = ", ".join(event.tags) if event.tags else "—"
 
+    # escape() экранирует < > & в тексте события: иначе Telegram примет
+    # их за разметку и не отправит сообщение
     return (
         f"🎯 <b>{index}. {escape(event.title)}</b>\n"
         f"📍 {escape(event.venue)}\n"
@@ -197,6 +263,101 @@ def format_event_card(event: Event, index: int) -> str:
     )
 
 
+def save_intent(user_id: int, event_id: int, status: str) -> None:
+    """Сохраняет отметку по событию (UPSERT по user_id + event_id).
+
+    Согласие на видимость не трогаем: новая строка получает visible = 0,
+    существующая сохраняет своё значение. Исключение — not_going,
+    при нём видимость сбрасывается.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO intents (user_id, event_id, status, visible, updated_at)
+            -- новая отметка всегда создаётся с visible = 0
+            VALUES (?, ?, ?, 0, datetime('now'))
+            -- строка на эту пару уже есть -> обновляем её
+            ON CONFLICT(user_id, event_id) DO UPDATE SET
+                status     = excluded.status,
+                -- excluded.visible здесь всегда 0, поэтому не берём его:
+                -- при not_going ставим 0, иначе оставляем то согласие,
+                -- которое человек дал раньше (intents.visible)
+                visible    = CASE
+                                 WHEN excluded.status = 'not_going' THEN 0
+                                 ELSE intents.visible
+                             END,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, event_id, status),
+        )
+
+
+def set_intent_visibility(user_id: int, event_id: int, visible: bool) -> bool:
+    """Меняет видимость у существующей отметки.
+
+    Возвращает False, если отметки по этому событию ещё нет.
+    """
+    with get_connection() as conn:
+        # именно UPDATE, а не UPSERT: согласие не должно создавать
+        # отметку по событию, которое человек не отмечал
+        cursor = conn.execute(
+            """
+            UPDATE intents
+            SET visible = ?, updated_at = datetime('now')
+            WHERE user_id = ? AND event_id = ?
+            """,
+            # в SQLite нет типа bool, пишем 1/0
+            (int(visible), user_id, event_id),
+        )
+        # rowcount — сколько строк изменил UPDATE; 0 значит «отметки нет»
+        return cursor.rowcount > 0
+
+
+def get_user_intents(user_id: int) -> list[UserIntent]:
+    """Отметки пользователя вместе с событиями, ближайшие сверху."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            -- JOIN подтягивает к отметке данные события: одним запросом
+            -- получаем и статус, и название с датой
+            SELECT e.*, i.status, i.visible
+            FROM intents i
+            JOIN events e ON e.id = i.event_id
+            WHERE i.user_id = ?
+            ORDER BY e.date
+            """,
+            (user_id,),
+        ).fetchall()
+
+    return [
+        UserIntent(
+            # в row лежат и колонки события, и статус с видимостью
+            event=_row_to_event(row),
+            status=row["status"],
+            # 1/0 из SQLite обратно в True/False
+            visible=bool(row["visible"]),
+        )
+        for row in rows
+    ]
+
+
+def format_intent_card(intent: UserIntent) -> str:
+    """Строка события для /my (parse_mode=HTML)."""
+    event = intent.event
+    weekday = WEEKDAYS_RU[event.date.weekday()]
+    # .get с запасным значением: если в базе окажется незнакомый статус,
+    # покажем его как есть, а не упадём
+    status = INTENT_STATUS_LABELS.get(intent.status, intent.status)
+    visibility = "показываю другим" if intent.visible else "не показываю"
+
+    return (
+        f"🎯 <b>{escape(event.title)}</b>\n"
+        f"📅 {event.date.strftime('%d.%m.%Y %H:%M')} ({weekday})\n"
+        f"👀 {status} · {visibility}"
+    )
+
+
+# Демо-данные: ими наполняется таблица events при первом запуске
 SEED_EVENTS: list[dict] = [
     {
         "title": "Трибьют-концерт «Кино»",
@@ -371,6 +532,7 @@ SEED_EVENTS: list[dict] = [
 
 def seed_events() -> None:
     """Наполняет таблицу events демо-данными. Повторный вызов безопасен."""
+    # список словарей -> список кортежей в порядке колонок запроса
     rows = [
         (
             event["title"],
@@ -387,6 +549,8 @@ def seed_events() -> None:
     ]
 
     with get_connection() as conn:
+        # executemany выполняет запрос для каждого кортежа,
+        # OR IGNORE молча пропускает дубли (см. idx_events_title_date)
         conn.executemany(
             """
             INSERT OR IGNORE INTO events
