@@ -73,6 +73,12 @@ class KudaGoSourceTests(unittest.TestCase):
                 raw[field] = "" if field != "dates" else []
                 self.assertIsNone(self.source.normalize(raw))
 
+    def test_service_timestamp_for_unknown_start_is_skipped(self) -> None:
+        raw = self.raw_event()
+        raw["dates"] = [{"start": -62135433000, "end": 1790542800}]
+
+        self.assertIsNone(self.source.normalize(raw))
+
     def test_fetch_retries_and_uses_documented_pagination_parameters(self) -> None:
         calls: list[str] = []
         sleeps: list[float] = []
@@ -188,6 +194,25 @@ class EventImportDatabaseTests(unittest.TestCase):
 
         self.assertIn("Идущая выставка", [item.title for item in found])
 
+    def test_find_skips_row_with_malformed_date(self) -> None:
+        db.upsert_source_events([self.event()])
+        with db.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO events
+                    (title, description, city, address, date, end_date, tags,
+                     venue, source_id, external_id, status)
+                VALUES
+                    ('Повреждённое', '', 'Москва', '', '1-01-03 00:00:17',
+                     '2099-01-01 00:00:00', '[]', '', 'kudago', 'bad-date',
+                     'active')
+                """
+            )
+
+        found = db.find_events(Profile(interests=[]))
+
+        self.assertEqual([item.title for item in found], ["Реальный концерт"])
+
     def test_legacy_rows_receive_null_source_fields_and_cleanup_is_explicit(self) -> None:
         with db.get_connection() as conn:
             conn.execute(
@@ -290,7 +315,16 @@ class EventMigrationTests(unittest.TestCase):
                 db.DB_PATH = original
 
         self.assertTrue(
-            {"source_id", "external_id", "source_url", "fetched_at", "status"}
+            {
+                "source_id",
+                "external_id",
+                "source_url",
+                "fetched_at",
+                "status",
+                "embedding",
+                "embedding_model",
+                "content_hash",
+            }
             <= columns
         )
         self.assertEqual(indexes["idx_events_source_external"], 1)

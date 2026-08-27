@@ -252,6 +252,15 @@ class RequestMigrationTests(unittest.TestCase):
                 db.DB_PATH = original_db_path
 
         self.assertIn("username", user_columns)
+        self.assertTrue(
+            {
+                "profile_embedding",
+                "profile_embedding_model",
+                "avoid_embedding",
+                "avoid_embedding_model",
+            }
+            <= user_columns
+        )
         self.assertTrue({"requests", "blocks"}.issubset(tables))
         self.assertEqual(name, "Alice")
 

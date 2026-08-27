@@ -1,4 +1,6 @@
 # src/event_bot/handlers.py
+import logging
+
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
@@ -23,6 +25,7 @@ from event_bot.db import (
     get_user_intent,
     get_user_intents,
     get_user_profile,
+    get_user_profile_embeddings,
     is_open_participant,
     mark_visibility_asked,
     reject_connection_request,
@@ -30,6 +33,11 @@ from event_bot.db import (
     save_user_profile,
     set_intent_visibility,
     update_user_identity,
+)
+from event_bot.embedding_provider import (
+    EmbeddingProvider,
+    profile_embedding_text,
+    vector_to_blob,
 )
 from event_bot.keyboards import (
     companion_keyboard,
@@ -49,6 +57,7 @@ from event_bot.storage import ProfileStore
 # Порядок регистрации важен: aiogram отдаёт апдейт ПЕРВОМУ обработчику,
 # чей фильтр совпал, поэтому команды объявлены выше перехватчика F.text.
 router = Router()
+logger = logging.getLogger(__name__)
 
 NO_PROFILE_TEXT = (
     "Профиля пока нет. Расскажи, что тебе интересно, "
@@ -150,8 +159,15 @@ async def find(
         await message.answer(NO_PROFILE_TEXT)
         return
 
-    # весь подбор и фильтрация — в db.find_events
-    events = find_events(profile)
+    # Векторы живут в SQLite, а не только в памяти, поэтому переживают рестарт.
+    embeddings = get_user_profile_embeddings(message.from_user.id)
+    events = find_events(
+        profile,
+        profile_embedding=embeddings[0],
+        profile_embedding_model=embeddings[1],
+        avoid_embedding=embeddings[2],
+        avoid_embedding_model=embeddings[3],
+    )
     if not events:
         await message.answer(
             "Не нашлось подходящих мероприятий. "
@@ -203,10 +219,16 @@ async def my_events(message: Message) -> None:
 @router.message(F.text)
 async def handle_profile_text(
     message: Message,
-    profile_extractor: ProfileExtractor,
+    profile_extractor: ProfileExtractor | None,
     profile_store: ProfileStore,
 ) -> None:
     if message.text is None or message.from_user is None:
+        return
+
+    if profile_extractor is None:
+        await message.answer(
+            "Сервис разбора профиля сейчас недоступен. Попробуй позже."
+        )
         return
 
     try:
@@ -231,6 +253,7 @@ async def handle_profile_text(
 async def confirm_profile(
     callback: CallbackQuery,
     profile_store: ProfileStore,
+    embedding_provider: EmbeddingProvider | None,
 ) -> None:
     user_id = callback.from_user.id
     profile = profile_store.drafts.get(user_id)
@@ -241,14 +264,37 @@ async def confirm_profile(
         )
         return
 
-    # черновик становится подтверждённым профилем и уходит в SQLite.
-    # Имя берём из Telegram: это единственное, что увидят другие участники
+    profile_embedding = None
+    avoid_embedding = None
+    embedding_model = None
+    positive_text = profile_embedding_text(profile.interests)
+    negative_text = profile_embedding_text(profile.avoid)
+    if embedding_provider is not None and positive_text:
+        texts = [positive_text]
+        if negative_text:
+            texts.append(negative_text)
+        try:
+            vectors = await embedding_provider.embed(texts)
+            profile_embedding = vector_to_blob(vectors[0])
+            if negative_text:
+                avoid_embedding = vector_to_blob(vectors[1])
+            embedding_model = embedding_provider.model
+        except Exception:
+            # Профиль всё равно сохраняется; /find перейдёт на старые теги.
+            logger.exception("Не удалось посчитать эмбеддинг профиля %s", user_id)
+
+    # Черновик становится подтверждённым профилем и уходит в SQLite.
+    # Имя берём из Telegram: это единственное, что увидят другие участники.
     profile_store.confirmed[user_id] = profile
     save_user_profile(
         user_id,
         profile,
         callback.from_user.first_name,
         callback.from_user.username,
+        profile_embedding=profile_embedding,
+        profile_embedding_model=(embedding_model if profile_embedding else None),
+        avoid_embedding=avoid_embedding,
+        avoid_embedding_model=(embedding_model if avoid_embedding else None),
     )
 
     # callback.message пустой у очень старых сообщений — отсюда проверка типа

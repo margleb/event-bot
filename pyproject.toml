@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "aiogram>=3.30.0",
+    "numpy>=2.0.0",
     "openai>=3.3.1",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.3",

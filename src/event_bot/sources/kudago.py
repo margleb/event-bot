@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import socket
 import time
@@ -211,7 +212,15 @@ class KudaGoSource(EventSource):
         valid_dates = [
             item
             for item in dates
-            if isinstance(item, dict) and isinstance(item.get("start"), (int, float))
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("start"), (int, float))
+                and not isinstance(item["start"], bool)
+                and math.isfinite(item["start"])
+                # KudaGo использует отрицательные значения около первого года
+                # как служебную дату для событий без известного начала.
+                and item["start"] >= 0
+            )
         ]
         if not valid_dates:
             return None
@@ -223,7 +232,12 @@ class KudaGoSource(EventSource):
         starts_at = starts_at.astimezone(MOSCOW_TZ).replace(tzinfo=None)
 
         end_timestamp = selected.get("end")
-        if not isinstance(end_timestamp, (int, float)):
+        if (
+            not isinstance(end_timestamp, (int, float))
+            or isinstance(end_timestamp, bool)
+            or not math.isfinite(end_timestamp)
+            or end_timestamp < 0
+        ):
             end_timestamp = selected["start"]
         ends_at = datetime.fromtimestamp(end_timestamp, timezone.utc)
         ends_at = ends_at.astimezone(MOSCOW_TZ).replace(tzinfo=None)

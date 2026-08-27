@@ -1,5 +1,6 @@
 # src/event_bot/db.py
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -8,6 +9,9 @@ from pathlib import Path
 from typing import Iterator
 from zoneinfo import ZoneInfo
 
+import numpy as np
+
+from event_bot.embedding_provider import vector_from_blob
 from event_bot.models import (
     Companion,
     ConnectionRequest,
@@ -24,8 +28,13 @@ DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "bot.db"
 # Формат, в котором даты лежат в SQLite: он сравним с datetime('now')
 DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+logger = logging.getLogger(__name__)
+
 # Сколько карточек максимум отправляем за один /find
 MAX_EVENTS = 5
+
+# Насколько сильно нежелательные интересы понижают semantic score.
+AVOID_SIMILARITY_WEIGHT = 0.5
 
 # Сколько других участников показываем по кнопке «Кто идёт»
 MAX_COMPANIONS = 5
@@ -114,6 +123,10 @@ def init_db() -> None:
                 budget_rub     INTEGER,
                 group_size_min INTEGER,
                 group_size_max INTEGER,
+                profile_embedding       BLOB,
+                profile_embedding_model TEXT,
+                avoid_embedding         BLOB,
+                avoid_embedding_model   TEXT,
                 created_at     TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
@@ -141,6 +154,9 @@ def init_db() -> None:
                 source_url  TEXT,
                 fetched_at  TEXT,
                 status      TEXT,
+                embedding       BLOB,
+                embedding_model TEXT,
+                content_hash    TEXT,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
@@ -196,6 +212,10 @@ def init_db() -> None:
         # прошлой версией бота, останется без name и visibility_asked
         _add_column_if_missing(conn, "users", "name", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(conn, "users", "username", "TEXT")
+        _add_column_if_missing(conn, "users", "profile_embedding", "BLOB")
+        _add_column_if_missing(conn, "users", "profile_embedding_model", "TEXT")
+        _add_column_if_missing(conn, "users", "avoid_embedding", "BLOB")
+        _add_column_if_missing(conn, "users", "avoid_embedding_model", "TEXT")
         _add_column_if_missing(
             conn, "intents", "visibility_asked", "INTEGER NOT NULL DEFAULT 0"
         )
@@ -208,6 +228,9 @@ def init_db() -> None:
         _add_column_if_missing(conn, "events", "source_url", "TEXT")
         _add_column_if_missing(conn, "events", "fetched_at", "TEXT")
         _add_column_if_missing(conn, "events", "status", "TEXT")
+        _add_column_if_missing(conn, "events", "embedding", "BLOB")
+        _add_column_if_missing(conn, "events", "embedding_model", "TEXT")
+        _add_column_if_missing(conn, "events", "content_hash", "TEXT")
 
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id "
@@ -243,6 +266,11 @@ def save_user_profile(
     profile: Profile,
     name: str,
     username: str | None = None,
+    *,
+    profile_embedding: bytes | None = None,
+    profile_embedding_model: str | None = None,
+    avoid_embedding: bytes | None = None,
+    avoid_embedding_model: str | None = None,
 ) -> None:
     """Сохраняет профиль пользователя (UPSERT по telegram_id).
 
@@ -252,9 +280,12 @@ def save_user_profile(
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO users (telegram_id, name, username, interests, avoid, days,
-                               budget_rub, group_size_min, group_size_max)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users
+                (telegram_id, name, username, interests, avoid, days,
+                 budget_rub, group_size_min, group_size_max,
+                 profile_embedding, profile_embedding_model,
+                 avoid_embedding, avoid_embedding_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             -- UPSERT: если строка с таким telegram_id уже есть,
             -- вместо ошибки обновляем её поля (excluded — то, что пытались
             -- вставить)
@@ -266,7 +297,11 @@ def save_user_profile(
                 days           = excluded.days,
                 budget_rub     = excluded.budget_rub,
                 group_size_min = excluded.group_size_min,
-                group_size_max = excluded.group_size_max
+                group_size_max = excluded.group_size_max,
+                profile_embedding       = excluded.profile_embedding,
+                profile_embedding_model = excluded.profile_embedding_model,
+                avoid_embedding         = excluded.avoid_embedding,
+                avoid_embedding_model   = excluded.avoid_embedding_model
             """,
             (
                 telegram_id,
@@ -280,6 +315,10 @@ def save_user_profile(
                 profile.budget_rub,
                 profile.preferred_group_size_min,
                 profile.preferred_group_size_max,
+                profile_embedding,
+                profile_embedding_model,
+                avoid_embedding,
+                avoid_embedding_model,
             ),
         )
 
@@ -322,6 +361,31 @@ def get_user_profile(telegram_id: int) -> Profile | None:
     )
 
 
+def get_user_profile_embeddings(
+    telegram_id: int,
+) -> tuple[bytes | None, str | None, bytes | None, str | None]:
+    """Положительный и отрицательный векторы подтверждённого профиля."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT profile_embedding, profile_embedding_model,
+                   avoid_embedding, avoid_embedding_model
+            FROM users
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+
+    if row is None:
+        return None, None, None, None
+    return (
+        row["profile_embedding"],
+        row["profile_embedding_model"],
+        row["avoid_embedding"],
+        row["avoid_embedding_model"],
+    )
+
+
 def _row_to_event(row: sqlite3.Row) -> Event:
     """Строка таблицы events -> модель Event."""
     return Event(
@@ -357,8 +421,96 @@ def _score(event: Event, interests: set[str], avoid: set[str]) -> int:
     return len(interests & tags) - len(avoid & tags)
 
 
-def find_events(profile: Profile) -> list[Event]:
-    """Подбирает до 5 текущих или будущих московских мероприятий."""
+def _decode_embedding(blob: bytes | None) -> np.ndarray | None:
+    if not blob:
+        return None
+    try:
+        vector = vector_from_blob(blob)
+    except ValueError:
+        return None
+    if vector.ndim != 1 or vector.size == 0 or not np.all(np.isfinite(vector)):
+        return None
+    return vector
+
+
+def _rank_by_tags(events: list[Event], profile: Profile) -> list[Event]:
+    interests = {tag.lower() for tag in profile.interests}
+    avoid = {tag.lower() for tag in profile.avoid}
+    return sorted(
+        events,
+        key=lambda event: (-_score(event, interests, avoid), event.date),
+    )
+
+
+def _rank_by_embeddings(
+    candidates: list[tuple[Event, sqlite3.Row]],
+    profile_embedding: bytes | None,
+    profile_embedding_model: str | None,
+    avoid_embedding: bytes | None,
+    avoid_embedding_model: str | None,
+) -> list[Event] | None:
+    """Возвращает semantic ranking или None, если векторы неприменимы."""
+    profile_vector = _decode_embedding(profile_embedding)
+    if profile_vector is None or not profile_embedding_model:
+        return None
+
+    events: list[Event] = []
+    vectors: list[np.ndarray] = []
+    for event, row in candidates:
+        if row["embedding_model"] != profile_embedding_model:
+            continue
+        event_vector = _decode_embedding(row["embedding"])
+        if event_vector is None or event_vector.size != profile_vector.size:
+            continue
+        events.append(event)
+        vectors.append(event_vector)
+
+    if not vectors:
+        return None
+
+    matrix = np.vstack(vectors)
+    profile_norm = np.linalg.norm(profile_vector)
+    event_norms = np.linalg.norm(matrix, axis=1)
+    usable = np.isfinite(event_norms) & (event_norms > 0)
+    if not np.isfinite(profile_norm) or profile_norm == 0 or not np.any(usable):
+        return None
+
+    scores = np.full(len(events), -np.inf, dtype=np.float32)
+    scores[usable] = (
+        matrix[usable] @ profile_vector / (event_norms[usable] * profile_norm)
+    )
+
+    negative_vector = _decode_embedding(avoid_embedding)
+    if (
+        negative_vector is not None
+        and avoid_embedding_model == profile_embedding_model
+        and negative_vector.size == profile_vector.size
+    ):
+        negative_norm = np.linalg.norm(negative_vector)
+        if negative_norm > 0:
+            negative_similarity = np.zeros(len(events), dtype=np.float32)
+            negative_similarity[usable] = (
+                matrix[usable] @ negative_vector
+                / (event_norms[usable] * negative_norm)
+            )
+            scores -= AVOID_SIMILARITY_WEIGHT * negative_similarity
+
+    order = sorted(
+        np.flatnonzero(usable),
+        key=lambda index: (-float(scores[index]), events[index].date),
+    )
+    return [events[index] for index in order]
+
+
+def find_events(
+    profile: Profile,
+    *,
+    profile_embedding: bytes | None = None,
+    profile_embedding_model: str | None = None,
+    avoid_embedding: bytes | None = None,
+    avoid_embedding_model: str | None = None,
+) -> list[Event]:
+    """Жёстко фильтрует в SQL, затем ранжирует векторами или тегами."""
     # Запрос собираем по частям: условие по бюджету добавляется,
     # только если бюджет вообще указан в профиле
     query = [
@@ -384,15 +536,28 @@ def find_events(profile: Profile) -> list[Event]:
     with get_connection() as conn:
         rows = conn.execute(" ".join(query), params).fetchall()
 
-    # приводим к нижнему регистру, чтобы «Музыка» и «музыка» совпали
-    interests = {tag.lower() for tag in profile.interests}
-    avoid = {tag.lower() for tag in profile.avoid}
+    candidates: list[tuple[Event, sqlite3.Row]] = []
+    for row in rows:
+        try:
+            candidates.append((_row_to_event(row), row))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Одна повреждённая строка не должна ломать /find для всех
+            # пользователей. Импорт валидирует новые даты отдельно.
+            logger.exception("Пропущено повреждённое событие id=%s", row["id"])
+    semantic = _rank_by_embeddings(
+        candidates,
+        profile_embedding,
+        profile_embedding_model,
+        avoid_embedding,
+        avoid_embedding_model,
+    )
+    if semantic is not None:
+        return semantic[:MAX_EVENTS]
 
-    # ранжирование делаем в Python: score считать в SQL здесь неудобно
-    events = [_row_to_event(row) for row in rows]
-    # При равном score показываем то, что раньше по дате
-    events.sort(key=lambda e: (-_score(e, interests, avoid), e.date))
-    return events[:MAX_EVENTS]
+    # Нет вектора профиля, модель не совпала или каталог ещё не проиндексирован:
+    # используем прежний алгоритм и не оставляем пользователя без результата.
+    fallback = _rank_by_tags([event for event, _ in candidates], profile)
+    return fallback[:MAX_EVENTS]
 
 
 def _format_source_link(event: Event) -> str:
