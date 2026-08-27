@@ -61,13 +61,28 @@ class Event(BaseModel):
     city: str
     address: str
     date: datetime
+    end_date: Optional[datetime] = None
     price_min: Optional[int] = None
     price_max: Optional[int] = None
+    price_text: Optional[str] = None
+    is_free: Optional[bool] = None
     tags: list[str] = Field(default_factory=list)
     venue: str
+    source_id: Optional[str] = None
+    external_id: Optional[str] = None
+    source_url: Optional[str] = None
+    fetched_at: Optional[str] = None
+    status: Optional[str] = None
 
     def get_price_display(self) -> str:
-        """Человекочитаемая цена. 0 и None трактуются как «бесплатно»."""
+        """Цена источника либо совместимое представление старых записей."""
+        if self.is_free:
+            return "Бесплатно"
+        if self.price_text:
+            return self.price_text
+        if self.is_free is False:
+            return "Цена не указана"
+
         # `or 0` схлопывает None и 0 в один случай
         low = self.price_min or 0
         high = self.price_max or 0

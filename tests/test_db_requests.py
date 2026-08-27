@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,7 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.methods import SendMessage
 import event_bot.db as db
 from event_bot.handlers import _send_message_safely
-from event_bot.models import Profile
+from event_bot.models import Event, Profile
 
 
 class ConnectionRequestDbTests(unittest.TestCase):
@@ -17,7 +18,24 @@ class ConnectionRequestDbTests(unittest.TestCase):
         self.original_db_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        db.seed_events()
+        db.upsert_source_events(
+            [
+                Event(
+                    title="Тестовый концерт",
+                    description="Событие для проверки запросов",
+                    city="Москва",
+                    address="Тестовая улица, 1",
+                    date=datetime(2099, 9, 12, 20, 0),
+                    tags=["музыка", "концерт"],
+                    venue="Тестовая площадка",
+                    source_id="test",
+                    external_id="event-1",
+                    source_url="https://example.com/event-1",
+                    fetched_at="2099-08-01T00:00:00+00:00",
+                    status="active",
+                )
+            ]
+        )
 
         with db.get_connection() as conn:
             self.event_id = conn.execute(

@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from event_bot.db import init_db, seed_events
+from event_bot.db import init_db
 from event_bot.handlers import router
 from event_bot.profile_service import ProfileExtractor
 from event_bot.storage import ProfileStore
@@ -18,10 +18,9 @@ async def run() -> None:
     # окружения; AsyncOpenAI подхватит свой ключ сам
     load_dotenv()
 
-    # схема и демо-данные при каждом старте: обе операции безопасны
-    # для повторного вызова
+    # Схема создаётся и мигрирует при каждом старте. События загружаются
+    # отдельно: python -m event_bot.import_events
     init_db()
-    seed_events()
 
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token:

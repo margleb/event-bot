@@ -6,6 +6,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Iterator
+from zoneinfo import ZoneInfo
 
 from event_bot.models import (
     Companion,
@@ -128,10 +129,18 @@ def init_db() -> None:
                 city        TEXT NOT NULL,
                 address     TEXT NOT NULL,
                 date        TEXT NOT NULL,
+                end_date    TEXT,
                 price_min   INTEGER,
                 price_max   INTEGER,
+                price_text  TEXT,
+                is_free     INTEGER,
                 tags        TEXT NOT NULL DEFAULT '[]',
                 venue       TEXT NOT NULL,
+                source_id   TEXT,
+                external_id TEXT,
+                source_url  TEXT,
+                fetched_at  TEXT,
+                status      TEXT,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
@@ -190,6 +199,15 @@ def init_db() -> None:
         _add_column_if_missing(
             conn, "intents", "visibility_asked", "INTEGER NOT NULL DEFAULT 0"
         )
+        # Поля импорта nullable: строки старой схемы должны сохраниться как есть.
+        _add_column_if_missing(conn, "events", "end_date", "TEXT")
+        _add_column_if_missing(conn, "events", "price_text", "TEXT")
+        _add_column_if_missing(conn, "events", "is_free", "INTEGER")
+        _add_column_if_missing(conn, "events", "source_id", "TEXT")
+        _add_column_if_missing(conn, "events", "external_id", "TEXT")
+        _add_column_if_missing(conn, "events", "source_url", "TEXT")
+        _add_column_if_missing(conn, "events", "fetched_at", "TEXT")
+        _add_column_if_missing(conn, "events", "status", "TEXT")
 
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id "
@@ -199,11 +217,16 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_events_city_date "
             "ON events(city, date)"
         )
-        # Уникальность «название + дата» защищает от дублей при повторном
-        # наполнении демо-данными: INSERT OR IGNORE опирается на этот индекс
+        # Разные источники могут прислать одно название на одну дату — это не
+        # дубль. Идентичность задаёт только пара источник + внешний id.
+        conn.execute("DROP INDEX IF EXISTS idx_events_title_date")
         conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_title_date "
-            "ON events(title, date)"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source_external "
+            "ON events(source_id, external_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_status_city_date "
+            "ON events(status, city, date)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_requests_from_created "
@@ -308,10 +331,22 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         city=row["city"],
         address=row["address"],
         date=datetime.strptime(row["date"], DB_DATETIME_FORMAT),
+        end_date=(
+            datetime.strptime(row["end_date"], DB_DATETIME_FORMAT)
+            if row["end_date"]
+            else None
+        ),
         price_min=row["price_min"],
         price_max=row["price_max"],
+        price_text=row["price_text"],
+        is_free=(bool(row["is_free"]) if row["is_free"] is not None else None),
         tags=json.loads(row["tags"]),
         venue=row["venue"],
+        source_id=row["source_id"],
+        external_id=row["external_id"],
+        source_url=row["source_url"],
+        fetched_at=row["fetched_at"],
+        status=row["status"],
     )
 
 
@@ -323,21 +358,24 @@ def _score(event: Event, interests: set[str], avoid: set[str]) -> int:
 
 
 def find_events(profile: Profile) -> list[Event]:
-    """Подбирает до 5 будущих московских мероприятий под профиль."""
+    """Подбирает до 5 текущих или будущих московских мероприятий."""
     # Запрос собираем по частям: условие по бюджету добавляется,
     # только если бюджет вообще указан в профиле
     query = [
         "SELECT * FROM events",
-        # только будущие события
-        "WHERE city = 'Москва' AND date > datetime('now', 'localtime')",
+        # active включает и будущие, и уже начавшиеся, но ещё не завершённые
+        "WHERE city = 'Москва'"
+        " AND status = 'active'"
+        " AND COALESCE(end_date, date) > datetime('now', 'localtime')",
     ]
     params: list[object] = []
 
     if profile.budget_rub is not None:
-        # цена не выше бюджета; 0 и NULL означают «бесплатно»
+        # Бесплатность берём из отдельного флага источника. Событие с
+        # неизвестной произвольной ценой не выдаём как якобы бесплатное.
         query.append(
-            "AND COALESCE(price_min, 0) <= ?"
-            " AND (price_max <= ? OR price_max IS NULL OR price_max = 0)"
+            "AND (is_free = 1 OR (price_min IS NOT NULL AND price_min <= ?"
+            " AND (price_max <= ? OR price_max IS NULL OR price_max = 0)))"
         )
         # значения подставляются через ?, а не форматированием строки —
         # так не бывает SQL-инъекций
@@ -357,24 +395,173 @@ def find_events(profile: Profile) -> list[Event]:
     return events[:MAX_EVENTS]
 
 
+def _format_source_link(event: Event) -> str:
+    """Прямая атрибуция источника для любой карточки события."""
+    if not event.source_url:
+        return ""
+    source_url = escape(event.source_url, quote=True)
+    source_name = "KudaGo" if event.source_id == "kudago" else event.source_id
+    source_name = escape(source_name or "сайт события")
+    return f'🔗 <a href="{source_url}">Источник: {source_name}</a>'
+
+
 def format_event_card(event: Event, index: int) -> str:
     """Карточка мероприятия для отправки в Telegram (parse_mode=HTML)."""
     # weekday(): 0 — понедельник, отсюда порядок в WEEKDAYS_RU
     weekday = WEEKDAYS_RU[event.date.weekday()]
     when = f"{event.date.strftime('%d.%m.%Y %H:%M')} ({weekday})"
     tags = ", ".join(event.tags) if event.tags else "—"
+    place = ", ".join(part for part in (event.venue, event.address) if part)
+    place_line = f"📍 {escape(place)}\n" if place else ""
+    source_link = _format_source_link(event)
+    source = f"\n{source_link}" if source_link else ""
 
     # escape() экранирует < > & в тексте события: иначе Telegram примет
     # их за разметку и не отправит сообщение
     return (
         f"🎯 <b>{index}. {escape(event.title)}</b>\n"
-        f"📍 {escape(event.venue)}\n"
-        f"🏙️ {escape(event.city)}, {escape(event.address)}\n"
+        f"{place_line}"
+        f"🏙️ {escape(event.city)}\n"
         f"📅 {when}\n"
         f"💰 {escape(event.get_price_display())}\n"
         f"🏷️ {escape(tags)}\n\n"
         f"📝 {escape(event.description)}"
+        f"{source}"
     )
+
+
+def upsert_source_events(
+    events: list[Event],
+    *,
+    now: datetime | None = None,
+) -> tuple[int, int, int]:
+    """Атомарно сохраняет импорт: (добавлено, обновлено, ошибок).
+
+    Сбой отдельной строки откатывается до savepoint и не мешает остальным.
+    Транзакция начинается только после полной загрузки ответа источника.
+    """
+    current_datetime = now or datetime.now(ZoneInfo("Europe/Moscow")).replace(
+        tzinfo=None
+    )
+    current = current_datetime.strftime(DB_DATETIME_FORMAT)
+    added = 0
+    updated = 0
+    errors = 0
+
+    with get_connection() as conn:
+        # События с уже прошедшей выбранной датой больше не участвуют в /find.
+        conn.execute(
+            """
+            UPDATE events
+            SET status = 'past'
+            WHERE source_id IS NOT NULL
+              AND status = 'active'
+              AND COALESCE(end_date, date) <= ?
+            """,
+            (current,),
+        )
+        existing = {
+            (row["source_id"], row["external_id"])
+            for row in conn.execute(
+                """
+                SELECT source_id, external_id
+                FROM events
+                WHERE source_id IS NOT NULL AND external_id IS NOT NULL
+                """
+            )
+        }
+
+        for event in events:
+            key = (event.source_id, event.external_id)
+            conn.execute("SAVEPOINT import_one_event")
+            try:
+                if not all(key):
+                    raise ValueError("у нормализованного события нет source id")
+                conn.execute(
+                    """
+                    INSERT INTO events
+                        (title, description, city, address, date, end_date,
+                         price_min, price_max, price_text, is_free, tags, venue,
+                         source_id, external_id, source_url, fetched_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id, external_id) DO UPDATE SET
+                        title       = excluded.title,
+                        description = excluded.description,
+                        city        = excluded.city,
+                        address     = excluded.address,
+                        date        = excluded.date,
+                        end_date    = excluded.end_date,
+                        price_min   = excluded.price_min,
+                        price_max   = excluded.price_max,
+                        price_text  = excluded.price_text,
+                        is_free     = excluded.is_free,
+                        tags        = excluded.tags,
+                        venue       = excluded.venue,
+                        source_url  = excluded.source_url,
+                        fetched_at  = excluded.fetched_at,
+                        status      = excluded.status
+                    """,
+                    (
+                        event.title,
+                        event.description,
+                        event.city,
+                        event.address,
+                        event.date.strftime(DB_DATETIME_FORMAT),
+                        (
+                            event.end_date.strftime(DB_DATETIME_FORMAT)
+                            if event.end_date
+                            else None
+                        ),
+                        event.price_min,
+                        event.price_max,
+                        event.price_text,
+                        int(event.is_free) if event.is_free is not None else None,
+                        json.dumps(event.tags, ensure_ascii=False),
+                        event.venue,
+                        event.source_id,
+                        event.external_id,
+                        event.source_url,
+                        event.fetched_at,
+                        event.status,
+                    ),
+                )
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT import_one_event")
+                conn.execute("RELEASE SAVEPOINT import_one_event")
+                errors += 1
+                continue
+            conn.execute("RELEASE SAVEPOINT import_one_event")
+
+            if key in existing:
+                updated += 1
+            else:
+                added += 1
+                existing.add(key)
+
+    return added, updated, errors
+
+
+def delete_legacy_events() -> int:
+    """Удаляет старые события без источника и зависящие от них записи."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS amount FROM events WHERE source_id IS NULL"
+        ).fetchone()
+        amount = row["amount"]
+        conn.execute(
+            """
+            DELETE FROM intents
+            WHERE event_id IN (SELECT id FROM events WHERE source_id IS NULL)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM requests
+            WHERE event_id IN (SELECT id FROM events WHERE source_id IS NULL)
+            """
+        )
+        conn.execute("DELETE FROM events WHERE source_id IS NULL")
+    return amount
 
 
 def save_intent(user_id: int, event_id: int, status: str) -> None:
@@ -494,11 +681,14 @@ def format_intent_card(intent: UserIntent) -> str:
     # покажем его как есть, а не упадём
     status = INTENT_STATUS_LABELS.get(intent.status, intent.status)
     visibility = "показываю другим" if intent.visible else "не показываю"
+    source_link = _format_source_link(event)
+    source = f"\n{source_link}" if source_link else ""
 
     return (
         f"🎯 <b>{escape(event.title)}</b>\n"
         f"📅 {event.date.strftime('%d.%m.%Y %H:%M')} ({weekday})\n"
         f"👀 {status} · {visibility}"
+        f"{source}"
     )
 
 
@@ -872,208 +1062,3 @@ def format_contact_message(
         f"Контакт: {contact}\n"
         f"Событие: {escape(event_title)}"
     )
-
-
-# Демо-данные: ими наполняется таблица events при первом запуске
-SEED_EVENTS: list[dict] = [
-    {
-        "title": "Трибьют-концерт «Кино»",
-        "description": "Живое исполнение главных песен группы «Кино» "
-                       "с большим составом музыкантов.",
-        "city": "Москва",
-        "address": "ул. Пресненский Вал, 6, стр. 1",
-        "date": "2026-09-12 20:00:00",
-        "price_min": 2500,
-        "price_max": 4500,
-        "tags": ["музыка", "концерт", "рок", "живая музыка"],
-        "venue": "Клуб 16 Тонн",
-    },
-    {
-        "title": "Выставка современного искусства «Город»",
-        "description": "Работы современных художников о городской среде "
-                       "и жизни мегаполиса.",
-        "city": "Москва",
-        "address": "Крымский Вал, 9, стр. 32",
-        "date": "2026-09-05 12:00:00",
-        "price_min": 500,
-        "price_max": 800,
-        "tags": ["искусство", "выставка", "культура"],
-        "venue": "Музей «Гараж»",
-    },
-    {
-        "title": "Stand-up вечер открытого микрофона",
-        "description": "Комики обкатывают новый материал: два часа "
-                       "свежих шуток и импровизации.",
-        "city": "Москва",
-        "address": "ул. Трёхгорный Вал, 6",
-        "date": "2026-09-13 20:00:00",
-        "price_min": 800,
-        "price_max": 1500,
-        "tags": ["комедия", "стендап", "вечер", "юмор"],
-        "venue": "Stand-Up Store Moscow",
-    },
-    {
-        "title": "Лекция «Космос для каждого»",
-        "description": "Астрофизик простым языком рассказывает о чёрных "
-                       "дырах, экзопланетах и новых телескопах.",
-        "city": "Москва",
-        "address": "Садовая-Кудринская ул., 5, стр. 1",
-        "date": "2026-09-10 19:00:00",
-        "price_min": 0,
-        "price_max": 0,
-        "tags": ["наука", "лекция", "космос", "образование"],
-        "venue": "Московский Планетарий",
-    },
-    {
-        "title": "Вечеринка Retrowave 80s",
-        "description": "Синтвейв, неон и танцы до утра: диджей-сет "
-                       "из хитов восьмидесятых.",
-        "city": "Москва",
-        "address": "Берсеневская наб., 6, стр. 3",
-        "date": "2026-09-19 23:00:00",
-        "price_min": 1000,
-        "price_max": 2000,
-        "tags": ["вечеринка", "танцы", "музыка", "ночь"],
-        "venue": "Клуб Gipsy",
-    },
-    {
-        "title": "Мастер-класс по гончарному делу",
-        "description": "Первое знакомство с гончарным кругом: лепим чашку "
-                       "и забираем её после обжига. Материалы включены.",
-        "city": "Москва",
-        "address": "ул. Покровка, 31",
-        "date": "2026-09-07 14:00:00",
-        "price_min": 3000,
-        "price_max": 3000,
-        "tags": ["мастер-класс", "творчество", "керамика", "хобби"],
-        "venue": "Керамическая студия «Глина»",
-    },
-    {
-        "title": "Показ авторского кино и обсуждение",
-        "description": "Фильм-лауреат фестивальной программы и разговор "
-                       "с киноведом после показа.",
-        "city": "Москва",
-        "address": "ул. Покровка, 47",
-        "date": "2026-09-15 19:30:00",
-        "price_min": 400,
-        "price_max": 700,
-        "tags": ["кино", "культура", "искусство"],
-        "venue": "Кинотеатр «Иллюзион»",
-    },
-    {
-        "title": "Йога на крыше",
-        "description": "Утренняя практика на открытой площадке с видом "
-                       "на город. Подходит новичкам.",
-        "city": "Москва",
-        "address": "Пресненская наб., 12",
-        "date": "2026-09-06 08:00:00",
-        "price_min": 1200,
-        "price_max": 1800,
-        "tags": ["йога", "спорт", "здоровье", "утро"],
-        "venue": "Roof Place",
-    },
-    {
-        "title": "Дегустация грузинских вин",
-        "description": "Восемь сортов вина с закусками и рассказом "
-                       "сомелье о регионах Грузии.",
-        "city": "Москва",
-        "address": "ул. Мясницкая, 15",
-        "date": "2026-09-20 18:00:00",
-        "price_min": 3500,
-        "price_max": 3500,
-        "tags": ["вино", "дегустация", "еда", "вечер"],
-        "venue": "Винный бар Big Wine Freaks",
-    },
-    {
-        "title": "Хакатон по искусственному интеллекту",
-        "description": "48 часов на прототип AI-продукта в команде, "
-                       "менторы и питч перед жюри.",
-        "city": "Москва",
-        "address": "Ленинградский пр-т, 36, стр. 11",
-        "date": "2026-09-21 10:00:00",
-        "price_min": 0,
-        "price_max": 0,
-        "tags": ["технологии", "хакатон", "программирование", "ai"],
-        "venue": "Технопарк «Мосхаб»",
-    },
-    {
-        "title": "Фестиваль уличной еды",
-        "description": "Тридцать фудтраков, лекторий о еде и живая музыка "
-                       "на весь день.",
-        "city": "Москва",
-        "address": "ул. Крымский Вал, 9",
-        "date": "2026-09-14 12:00:00",
-        "price_min": 0,
-        "price_max": 0,
-        "tags": ["еда", "фестиваль", "отдых", "музыка"],
-        "venue": "Парк Горького",
-    },
-    {
-        "title": "Спектакль-импровизация",
-        "description": "Актёры играют историю по подсказкам зала — "
-                       "второго такого показа не будет.",
-        "city": "Москва",
-        "address": "Малый Гнездниковский пер., 10",
-        "date": "2026-09-22 19:30:00",
-        "price_min": 1800,
-        "price_max": 2800,
-        "tags": ["театр", "импровизация", "комедия", "вечер"],
-        "venue": "Учебный театр ГИТИС",
-    },
-    {
-        "title": "Экскурсия по крышам Замоскворечья",
-        "description": "Прогулка с гидом по историческим кварталам "
-                       "и подъём на смотровую площадку.",
-        "city": "Москва",
-        "address": "ул. Пятницкая, 18",
-        "date": "2026-09-08 18:00:00",
-        "price_min": 900,
-        "price_max": 1400,
-        "tags": ["экскурсия", "прогулка", "история", "город"],
-        "venue": "Точка сбора у метро «Новокузнецкая»",
-    },
-    {
-        "title": "Настольные игры: вечер знакомств",
-        "description": "Ведущий рассадит по столам и объяснит правила — "
-                       "приходить одному нормально.",
-        "city": "Москва",
-        "address": "ул. Большая Дмитровка, 32",
-        "date": "2026-09-11 19:00:00",
-        "price_min": 500,
-        "price_max": 900,
-        "tags": ["настольные игры", "знакомства", "вечер", "общение"],
-        "venue": "Антикафе «Циферблат»",
-    },
-]
-
-
-def seed_events() -> None:
-    """Наполняет таблицу events демо-данными. Повторный вызов безопасен."""
-    # список словарей -> список кортежей в порядке колонок запроса
-    rows = [
-        (
-            event["title"],
-            event["description"],
-            event["city"],
-            event["address"],
-            event["date"],
-            event["price_min"],
-            event["price_max"],
-            json.dumps(event["tags"], ensure_ascii=False),
-            event["venue"],
-        )
-        for event in SEED_EVENTS
-    ]
-
-    with get_connection() as conn:
-        # executemany выполняет запрос для каждого кортежа,
-        # OR IGNORE молча пропускает дубли (см. idx_events_title_date)
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO events
-                (title, description, city, address, date,
-                 price_min, price_max, tags, venue)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
