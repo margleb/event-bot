@@ -34,7 +34,7 @@ Modes:
 Flags:
   --html    Also write a self-contained interactive HTML page (table of
             contents, diagrams, clickable quiz in teach-me mode) to
-            /tmp/YYYY-MM-DD-explanation-<slug>.html
+            <project-root>/tmp/<creator>-YYYY-MM-DD-explanation-<slug>.html
 
 Target (optional, defaults to your working diff):
   <empty>        Branch diff vs upstream/main, plus uncommitted changes
@@ -94,7 +94,7 @@ Read `references/output-formats.md` before writing — it owns the full output c
 
 ## Step 5: HTML output (only if `--html` was passed)
 
-Produce the markdown explanation in the terminal as usual, **and** write a single self-contained HTML file (inline CSS and JS) following the spec in `references/output-formats.md` § HTML output. Filename: `/tmp/YYYY-MM-DD-explanation-<slug>.html` with today's actual date, so files stay time-sorted and out of version control. Tell the user the path when done.
+Produce the markdown explanation in the terminal as usual, **and** write a single self-contained HTML file (inline CSS and JS) following the spec in `references/output-formats.md` § HTML output. Resolve the project root with `git rev-parse --show-toplevel`; if the current directory is not in a Git repository, use the current working directory. Create `<project-root>/tmp/` if needed and write `<creator>-YYYY-MM-DD-explanation-<slug>.html` there using today's actual date. Set `<creator>` to `codex` when running in OpenAI Codex and `claude` when running in Claude Code. Tell the user the full path when done.
 
 ## Honesty rules
 
@@ -110,7 +110,7 @@ Actions: resolve the PR via `gh pr view`, gather diff and description, investiga
 Result: one-screen orientation with change map, behavior changes, and ranked watch-outs.
 
 **Example 2** — User says: "/explain-diff teach-me 4821 --html"
-Actions: fetch PR #4821, investigate broadly (teach-me needs neighborhood context), write the teaching walkthrough in the terminal, then generate `/tmp/2026-07-02-explanation-tenant-cache-keys.html` with TOC, diagrams, and a clickable quiz.
+Actions: fetch PR #4821, investigate broadly (teach-me needs neighborhood context), write the teaching walkthrough in the terminal, then generate `<project-root>/tmp/codex-2026-07-02-explanation-tenant-cache-keys.html` in Codex or the corresponding `claude-...` filename in Claude Code, with TOC, diagrams, and a clickable quiz.
 Result: markdown walkthrough plus the HTML file path.
 
 **Example 3** — User says: "/explain-diff expert before I review this"

@@ -69,7 +69,7 @@ Audience: a domain expert about to review this PR. Zero background, no term defi
 
 One single self-contained HTML file — CSS and JavaScript inline, no external resources. Written **in addition to** the terminal markdown, never instead of it.
 
-**File location:** `/tmp/YYYY-MM-DD-explanation-<slug>.html` using today's real date and a short kebab-case slug of the change title. The date prefix keeps files time-sorted and out of version control. Report the full path when done.
+**File location:** `<project-root>/tmp/<creator>-YYYY-MM-DD-explanation-<slug>.html` using today's real date and a short kebab-case slug of the change title. Set `<creator>` to `codex` in OpenAI Codex and `claude` in Claude Code. Resolve the project root with `git rev-parse --show-toplevel`; if unavailable, use the current working directory. Create the `tmp/` directory when needed. Report the full path when done.
 
 **Structure:** one long page (no tabs at the top level) with a sticky or top-anchored table of contents linking to section headers, and the sections of whichever mode is active. Basic responsive styling so it reads well on a phone.
 

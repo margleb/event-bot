@@ -33,7 +33,7 @@ It serves two audiences at once: a human trying to understand *what changed and 
 
 **Flags:**
 
-- `--html` — also write a self-contained interactive HTML page (table of contents, diagrams, clickable quiz in teach-me mode) to `/tmp/YYYY-MM-DD-explanation-<slug>.html`
+- `--html` — also write a self-contained interactive HTML page (table of contents, diagrams, clickable quiz in teach-me mode) to `<project-root>/tmp/<creator>-YYYY-MM-DD-explanation-<slug>.html`, where `<creator>` is `codex` or `claude`
 
 ### Examples
 

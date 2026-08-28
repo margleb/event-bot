@@ -1,0 +1,8 @@
+interface:
+  display_name: "Explain Project"
+  short_description: "Teach how a focused concept works in this repository."
+  default_prompt: "Use $explain-project to teach me how a focused concept or flow works in this repository."
+  brand_color: "#0F766E"
+
+policy:
+  allow_implicit_invocation: true
