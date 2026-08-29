@@ -18,6 +18,7 @@ services:
 
   event-sync:
     image: event-bot:local
+    pull_policy: never
     container_name: event-bot-sync
     init: true
     restart: unless-stopped
