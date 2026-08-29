@@ -40,11 +40,14 @@
       id: 12, title: "Концерты · Выставки", status: "active",
       topics: ["Концерты", "Выставки"], member_count: 3,
       minimum_members: 3, maximum_members: 5,
+      can_interact: true,
       members: [
-        { name: "Вы", is_me: true, common_interests: ["Концерты", "Выставки"], group_size: "2–5 человек" },
-        { name: "Аня", is_me: false, common_interests: ["Концерты"], group_size: "3–5 человек" },
-        { name: "Максим", is_me: false, common_interests: ["Выставки"], group_size: "3–5 человек" },
+        { name: "Вы", is_me: true, member_key: null, common_interests: ["Концерты", "Выставки"], group_size: "2–5 человек", connection_state: "self" },
+        { name: "Аня", is_me: false, member_key: "preview-anya", common_interests: ["Концерты"], group_size: "3–5 человек", connection_state: "connected", contact: { name: "Аня", url: "https://t.me/telegram" } },
+        { name: "Максим", is_me: false, member_key: "preview-max", common_interests: ["Выставки"], group_size: "3–5 человек", connection_state: "available" },
       ],
+      invites: [],
+      messages: [],
     },
     events: [
       { id: 101, title: "Джаз на крыше: вечерний концерт", description: "Живая музыка, закат над Москвой и камерная атмосфера. В программе — современный джаз и авторские аранжировки.", city: "Москва", address: "Берсеневская набережная, 6", date: "2026-09-04T19:30:00", end_date: null, price: "от 1 800 ₽", tags: ["джаз", "концерт", "на крыше"], venue: "Красный Октябрь", source_url: "https://kudago.com/", source_id: "kudago", source_name: "KudaGo", source_mark: "K", intent: "interested", visible: false },
@@ -54,6 +57,19 @@
     my_events: [],
   };
   LOCAL_PREVIEW.my_events = LOCAL_PREVIEW.events.filter((event) => event.intent);
+  LOCAL_PREVIEW.group.invites = [{
+    id: 7,
+    event: LOCAL_PREVIEW.events[0],
+    creator_name: "Аня",
+    created_at: "2026-08-29 12:30:00",
+    my_response: null,
+    going_names: ["Аня"],
+    declined_count: 0,
+  }];
+  LOCAL_PREVIEW.group.messages = [
+    { id: 1, author_name: "Аня", is_me: false, message: "Как вам джаз в пятницу?", created_at: "2026-08-29 12:35:00" },
+    { id: 2, author_name: "Вы", is_me: true, message: "Я за!", created_at: "2026-08-29 12:38:00" },
+  ];
 
   function localAdminPreview(days) {
     const today = new Date();
@@ -114,12 +130,14 @@
     selectedDays: new Set(),
     budget: null,
     group: [null, null],
+    groupInvitePicker: false,
     modalEventId: null,
     adminData: null,
     adminDays: 30,
     adminMetric: "active_users",
     adminLoading: false,
   };
+  let groupPollTimer = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -280,6 +298,83 @@
     $("#onboarding-copy").classList.toggle("hidden", Boolean(state.data.profile));
   }
 
+  function groupConnectionActions(member) {
+    if (member.is_me) return "";
+    if (member.connection_state === "connected" && member.contact?.url) {
+      return `<a class="member-action connected" href="${escapeHtml(member.contact.url)}" target="_blank" rel="noopener noreferrer">Написать в Telegram ↗</a>`;
+    }
+    if (member.connection_state === "pending_sent") {
+      return `<button class="member-action" type="button" disabled>Запрос отправлен</button>`;
+    }
+    if (member.connection_state === "rejected") {
+      return `<button class="member-action" type="button" disabled>Запрос отклонён</button>`;
+    }
+    if (member.connection_state === "pending_received" && member.request_id) {
+      return `<div class="member-response"><button class="member-action accept" type="button" data-connection-action="accept" data-request-id="${member.request_id}">Познакомиться</button><button class="member-action" type="button" data-connection-action="reject" data-request-id="${member.request_id}">Не сейчас</button></div>`;
+    }
+    if (member.connection_state === "available") {
+      return `<button class="member-action" type="button" data-connect="${escapeHtml(member.member_key)}">Познакомиться</button>`;
+    }
+    return "";
+  }
+
+  function groupInviteCard(invite) {
+    const event = invite.event;
+    const going = (invite.going_names || []).join(", ");
+    return `
+      <article class="group-invite-card">
+        <button class="group-invite-open" type="button" data-open="${event.id}">
+          <span>${formatWhen(event.date, true)}</span>
+          <strong>${escapeHtml(event.title)}</strong>
+          <small>${escapeHtml(event.venue || event.address || "Москва")}</small>
+        </button>
+        <p><b>${escapeHtml(invite.creator_name)}</b> предлагает сходить вместе</p>
+        <div class="invite-attendance">${going ? `Идут: ${escapeHtml(going)}` : "Пока никто не ответил"}${invite.declined_count ? ` · Не смогут: ${invite.declined_count}` : ""}</div>
+        <div class="invite-actions">
+          <button class="${invite.my_response === "going" ? "active" : ""}" type="button" data-invite-response="going" data-invite-id="${invite.id}">Иду</button>
+          <button class="${invite.my_response === "declined" ? "active" : ""}" type="button" data-invite-response="declined" data-invite-id="${invite.id}">Не смогу</button>
+        </div>
+      </article>`;
+  }
+
+  function groupEventPicker() {
+    if (!state.groupInvitePicker) return "";
+    const seen = new Set();
+    const candidates = [...(state.data.events || []), ...(state.data.my_events || [])]
+      .filter((event) => {
+        if (!event?.id || seen.has(event.id)) return false;
+        seen.add(event.id);
+        return true;
+      })
+      .filter((event) => new Date(event.end_date || event.date) > new Date())
+      .slice(0, 12);
+    const items = candidates.map((event) => `
+      <button class="group-picker-event" type="button" data-group-invite-event="${event.id}">
+        <span>${formatWhen(event.date, true)}</span>
+        <strong>${escapeHtml(event.title)}</strong>
+        <small>${escapeHtml(event.venue || event.address || "Москва")}</small>
+      </button>`).join("");
+    return `<div class="group-event-picker"><div class="group-subheading"><h3>Что предложить группе</h3><button type="button" data-toggle-group-picker>×</button></div>${items || '<p class="group-empty-copy">Сначала сохраните мероприятие в афише.</p>'}</div>`;
+  }
+
+  function groupChat(group) {
+    const messages = (group.messages || []).map((message) => `
+      <article class="chat-message ${message.is_me ? "me" : ""}">
+        <b>${escapeHtml(message.author_name)}</b>
+        <p>${escapeHtml(message.message)}</p>
+        <time>${escapeHtml(formatChatTime(message.created_at))}</time>
+      </article>`).join("");
+    return `
+      <section class="group-chat">
+        <div class="group-subheading"><div><p class="eyebrow">ОБЩИЙ ЧАТ</p><h3>Договориться о встрече</h3></div></div>
+        <div class="chat-list">${messages || '<p class="group-empty-copy">Напишите первым — например, предложите познакомиться перед мероприятием.</p>'}</div>
+        <form id="group-chat-form" class="chat-form">
+          <textarea id="group-chat-input" maxlength="1000" rows="2" placeholder="Сообщение группе" aria-label="Сообщение группе"></textarea>
+          <button type="submit" aria-label="Отправить сообщение">↑</button>
+        </form>
+      </section>`;
+  }
+
   function renderGroup() {
     const container = $("#group-content");
     if (!state.data.group_matching_enabled) {
@@ -313,6 +408,7 @@
           <div>
             <h4>${escapeHtml(member.name)}</h4>
             <p>${common ? `Общее: ${escapeHtml(common)}` : "Профиль совместим с группой"} · ${escapeHtml(member.group_size)}</p>
+            ${ready ? groupConnectionActions(member) : ""}
           </div>
         </article>`;
     }).join("");
@@ -320,6 +416,7 @@
       ? "Группа собрана. Она останется вашей, пока вы не выключите подбор в профиле."
       : `Уже ${group.member_count} из ${group.minimum_members}. ${missing === 1 ? "Ищем ещё одного участника." : `Ищем ещё ${missing} участников.`}`;
 
+    const invites = (group.invites || []).map(groupInviteCard).join("");
     container.innerHTML = `
       <article class="group-hero">
         <span class="group-status">${ready ? "ГРУППА СОБРАНА" : "ИДЁТ ПОДБОР"}</span>
@@ -328,8 +425,19 @@
         <div class="tag-row">${topics}</div>
         <div class="group-progress"><span style="width:${progress}%"></span></div>
       </article>
+      ${ready ? `<div class="group-primary-actions"><button class="primary-button" type="button" data-toggle-group-picker><span>＋</span> Предложить мероприятие</button></div>${groupEventPicker()}` : ""}
+      ${ready ? `<section class="group-invites"><div class="group-subheading"><div><p class="eyebrow">СОВМЕСТНЫЕ ПЛАНЫ</p><h3>Куда идём</h3></div></div>${invites || '<p class="group-empty-copy">Пока никто ничего не предложил.</p>'}</section>` : ""}
       <h3 class="group-members-title">Участники · ${group.member_count}/${group.maximum_members}</h3>
-      <div class="member-list">${members}</div>`;
+      <div class="member-list">${members}</div>
+      ${ready ? groupChat(group) : ""}`;
+  }
+
+  function formatChatTime(raw) {
+    if (!raw) return "";
+    const normalized = raw.includes("T") ? raw : `${raw.replace(" ", "T")}Z`;
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   }
 
   function formatNumber(value, digits = 0) {
@@ -515,6 +623,10 @@
     if (tab === "profile") renderProfile();
     if (tab === "admin") void loadAdminAnalytics();
     trackMiniapp(`tab.${tab}`);
+    clearInterval(groupPollTimer);
+    groupPollTimer = tab === "group" && tg?.initData
+      ? setInterval(() => void refreshGroup(true), 15000)
+      : null;
   }
 
   function mergeEvent(updated) {
@@ -555,8 +667,97 @@
     } catch (error) { toast(error.message); }
   }
 
+  function applyGroupResponse(result) {
+    if (!result?.group) return;
+    state.data.group = result.group;
+    for (const invite of result.group.invites || []) mergeGroupEvent(invite.event);
+    renderFeed(); renderMy(); renderGroup();
+  }
+
+  function mergeGroupEvent(updated) {
+    const feedIndex = state.data.events.findIndex((event) => event.id === updated.id);
+    if (feedIndex >= 0) state.data.events[feedIndex] = { ...state.data.events[feedIndex], ...updated };
+    const myIndex = state.data.my_events.findIndex((event) => event.id === updated.id);
+    if (myIndex >= 0) state.data.my_events[myIndex] = { ...state.data.my_events[myIndex], ...updated };
+    else if (updated.intent) state.data.my_events.push(updated);
+  }
+
+  async function refreshGroup(silent = false) {
+    if (!tg?.initData || state.tab !== "group") return;
+    try {
+      const group = await api("/group");
+      state.data.group = group;
+      for (const invite of group.invites || []) mergeGroupEvent(invite.event);
+      renderGroup();
+    } catch (error) {
+      if (!silent) toast(error.message);
+    }
+  }
+
+  async function requestGroupContact(memberKey) {
+    if (!tg?.initData) { toast("В режиме просмотра запрос не отправляется"); return; }
+    try {
+      const result = await api(`/group/connections/${encodeURIComponent(memberKey)}`, { method: "POST" });
+      applyGroupResponse(result);
+      haptic("medium");
+      toast(result.status === "accepted" ? "Контакты открыты" : "Запрос отправлен");
+    } catch (error) { toast(error.message); }
+  }
+
+  async function respondGroupContact(requestId, action) {
+    if (!tg?.initData) { toast("В режиме просмотра ответ не отправляется"); return; }
+    try {
+      const result = await api(`/group/connections/${requestId}/${action}`, { method: "POST" });
+      applyGroupResponse(result);
+      haptic("medium");
+      toast(action === "accept" ? "Теперь можно написать друг другу" : "Запрос отклонён");
+    } catch (error) { toast(error.message); }
+  }
+
+  async function createGroupInvite(eventId) {
+    if (!tg?.initData) { toast("В режиме просмотра приглашение не отправляется"); return; }
+    try {
+      const result = await api("/group/invites", { method: "POST", body: JSON.stringify({ event_id: eventId }) });
+      state.groupInvitePicker = false;
+      applyGroupResponse(result);
+      haptic("medium");
+      toast(result.status === "created" ? "Группа получила приглашение" : "Это событие уже предложено");
+    } catch (error) { toast(error.message); }
+  }
+
+  async function respondGroupInvite(inviteId, response) {
+    if (!tg?.initData) { toast("В режиме просмотра ответ не отправляется"); return; }
+    try {
+      const result = await api(`/group/invites/${inviteId}/response`, { method: "PUT", body: JSON.stringify({ status: response }) });
+      applyGroupResponse(result);
+      haptic();
+      toast(response === "going" ? "Добавили в ваши планы" : "Ответ сохранён");
+    } catch (error) { toast(error.message); }
+  }
+
+  async function sendGroupMessage(event) {
+    event.preventDefault();
+    const input = $("#group-chat-input");
+    const message = input?.value.trim();
+    if (!message) return;
+    if (!tg?.initData) { input.value = ""; toast("В режиме просмотра сообщение не отправляется"); return; }
+    const button = $("#group-chat-form button[type='submit']");
+    if (button) button.disabled = true;
+    try {
+      const result = await api("/group/messages", { method: "POST", body: JSON.stringify({ message }) });
+      applyGroupResponse(result);
+      haptic();
+      requestAnimationFrame(() => {
+        const list = $(".chat-list");
+        if (list) list.scrollTop = list.scrollHeight;
+      });
+    } catch (error) { toast(error.message); }
+    finally { if (button) button.disabled = false; }
+  }
+
   function findEvent(id) {
-    return [...(state.data.events || []), ...(state.data.my_events || [])].find((event) => event.id === Number(id));
+    const groupEvents = (state.data.group?.invites || []).map((invite) => invite.event);
+    return [...(state.data.events || []), ...(state.data.my_events || []), ...groupEvents].find((event) => event.id === Number(id));
   }
 
   function openModal(id) {
@@ -697,8 +898,21 @@
       if (visibility) setVisibility(Number(visibility.dataset.id), visibility.dataset.visible === "true");
       const groupSettings = event.target.closest("[data-go-profile]");
       if (groupSettings) setTab("profile");
+      const connect = event.target.closest("[data-connect]");
+      if (connect) void requestGroupContact(connect.dataset.connect);
+      const connectionResponse = event.target.closest("[data-connection-action]");
+      if (connectionResponse) void respondGroupContact(Number(connectionResponse.dataset.requestId), connectionResponse.dataset.connectionAction);
+      const toggleGroupPicker = event.target.closest("[data-toggle-group-picker]");
+      if (toggleGroupPicker) { state.groupInvitePicker = !state.groupInvitePicker; haptic(); renderGroup(); }
+      const groupInvite = event.target.closest("[data-group-invite-event]");
+      if (groupInvite) void createGroupInvite(Number(groupInvite.dataset.groupInviteEvent));
+      const inviteResponse = event.target.closest("[data-invite-response]");
+      if (inviteResponse) void respondGroupInvite(Number(inviteResponse.dataset.inviteId), inviteResponse.dataset.inviteResponse);
       const source = event.target.closest("#modal-source");
       if (source) trackMiniapp("external_source");
+    });
+    document.addEventListener("submit", (event) => {
+      if (event.target.matches("#group-chat-form")) void sendGroupMessage(event);
     });
     $("#interest-chips").addEventListener("click", (event) => {
       const button = event.target.closest("[data-interest]");
@@ -780,7 +994,8 @@
       configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
       $("#loading").classList.add("hidden");
       $("#app").classList.remove("hidden");
-      setTab(state.data.profile ? "feed" : "profile");
+      const requestedTab = new URLSearchParams(window.location.search).get("tab");
+      setTab(state.data.profile ? (requestedTab === "group" ? "group" : "feed") : "profile");
     } catch (error) {
       $("#loading").classList.add("hidden");
       $("#launch-screen").classList.remove("hidden");

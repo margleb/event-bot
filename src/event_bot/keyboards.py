@@ -15,13 +15,16 @@ DIGEST_WEEKDAY_BUTTONS = (
 )
 
 
-def miniapp_keyboard(url: str) -> InlineKeyboardMarkup:
+def miniapp_keyboard(
+    url: str,
+    text: str = "✨ Открыть подборку",
+) -> InlineKeyboardMarkup:
     """Кнопка запуска визуального приложения внутри Telegram."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✨ Открыть подборку",
+                    text=text,
                     web_app=WebAppInfo(url=url),
                 )
             ]

@@ -18,6 +18,9 @@ from event_bot.models import (
     ConnectionRequest,
     Event,
     GroupAssignment,
+    GroupConnectionRequest,
+    GroupEventInvite,
+    GroupMessage,
     InterestGroup,
     InterestGroupView,
     Profile,
@@ -193,6 +196,53 @@ def init_db() -> None:
                 user_id   INTEGER NOT NULL,
                 joined_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (group_id, user_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_connection_requests (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id   INTEGER NOT NULL,
+                from_user  INTEGER NOT NULL,
+                to_user    INTEGER NOT NULL,
+                status     TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (group_id, from_user, to_user)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interest_group_messages (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id   INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                message    TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_event_invites (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id   INTEGER NOT NULL,
+                event_id   INTEGER NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (group_id, event_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_event_invite_responses (
+                invite_id  INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                status     TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (invite_id, user_id)
             )
             """
         )
@@ -392,6 +442,18 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_groups_status "
             "ON interest_groups(status, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_connection_pair "
+            "ON group_connection_requests(group_id, from_user, to_user, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_messages_group_created "
+            "ON interest_group_messages(group_id, created_at, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_invites_group_created "
+            "ON group_event_invites(group_id, created_at, id)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_usage_events_created "
@@ -847,6 +909,21 @@ def _leave_group_in_connection(
         return False
     group_id = row["group_id"]
     conn.execute(
+        "DELETE FROM group_event_invite_responses "
+        "WHERE user_id = ? AND invite_id IN "
+        "(SELECT id FROM group_event_invites WHERE group_id = ?)",
+        (telegram_id, group_id),
+    )
+    conn.execute(
+        """
+        UPDATE group_connection_requests
+        SET status = 'rejected'
+        WHERE group_id = ? AND status = 'pending'
+          AND (from_user = ? OR to_user = ?)
+        """,
+        (group_id, telegram_id, telegram_id),
+    )
+    conn.execute(
         "DELETE FROM interest_group_members WHERE user_id = ?",
         (telegram_id,),
     )
@@ -855,6 +932,20 @@ def _leave_group_in_connection(
         (group_id,),
     ).fetchone()["amount"]
     if amount == 0:
+        conn.execute(
+            "DELETE FROM group_event_invite_responses "
+            "WHERE invite_id IN (SELECT id FROM group_event_invites WHERE group_id = ?)",
+            (group_id,),
+        )
+        conn.execute("DELETE FROM group_event_invites WHERE group_id = ?", (group_id,))
+        conn.execute(
+            "DELETE FROM interest_group_messages WHERE group_id = ?",
+            (group_id,),
+        )
+        conn.execute(
+            "DELETE FROM group_connection_requests WHERE group_id = ?",
+            (group_id,),
+        )
         conn.execute("DELETE FROM interest_groups WHERE id = ?", (group_id,))
     else:
         _recompute_group_topics(conn, group_id)
@@ -1126,6 +1217,527 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         fetched_at=row["fetched_at"],
         status=row["status"],
     )
+
+
+def get_interest_group_member_ids(group_id: int) -> list[int]:
+    """Telegram ID участников группы для служебных уведомлений."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id
+            FROM interest_group_members
+            WHERE group_id = ?
+            ORDER BY joined_at, user_id
+            """,
+            (group_id,),
+        ).fetchall()
+    return [row["user_id"] for row in rows]
+
+
+def _active_group_id(conn: sqlite3.Connection, user_id: int) -> int | None:
+    row = conn.execute(
+        """
+        SELECT gm.group_id
+        FROM interest_group_members gm
+        JOIN interest_groups g ON g.id = gm.group_id
+        WHERE gm.user_id = ? AND g.status = 'active'
+        """,
+        (user_id,),
+    ).fetchone()
+    return row["group_id"] if row is not None else None
+
+
+_GROUP_REQUEST_QUERY = """
+    SELECT r.id, r.group_id, r.from_user, r.to_user, r.status,
+           g.topics,
+           sender.name AS from_name,
+           sender.username AS from_username,
+           sender.interests AS from_interests,
+           recipient.name AS to_name,
+           recipient.username AS to_username,
+           recipient.interests AS to_interests
+    FROM group_connection_requests r
+    JOIN interest_groups g ON g.id = r.group_id
+    JOIN users sender ON sender.telegram_id = r.from_user
+    JOIN users recipient ON recipient.telegram_id = r.to_user
+    WHERE r.id = ?
+"""
+
+
+def _row_to_group_connection_request(row: sqlite3.Row) -> GroupConnectionRequest:
+    try:
+        sender_interests = {
+            value.casefold()
+            for value in json.loads(row["from_interests"])
+            if isinstance(value, str)
+        }
+        recipient_interests = json.loads(row["to_interests"])
+    except (TypeError, json.JSONDecodeError):
+        sender_interests, recipient_interests = set(), []
+    try:
+        topics = json.loads(row["topics"])
+    except (TypeError, json.JSONDecodeError):
+        topics = []
+    return GroupConnectionRequest(
+        id=row["id"],
+        group_id=row["group_id"],
+        group_title=" · ".join(topics) or "Новые знакомства",
+        from_user=row["from_user"],
+        to_user=row["to_user"],
+        from_name=row["from_name"].strip() or UNKNOWN_NAME,
+        to_name=row["to_name"].strip() or UNKNOWN_NAME,
+        from_username=row["from_username"],
+        to_username=row["to_username"],
+        common_interests=[
+            value
+            for value in recipient_interests
+            if isinstance(value, str) and value.casefold() in sender_interests
+        ],
+        status=row["status"],
+    )
+
+
+def _get_group_connection_request(
+    conn: sqlite3.Connection,
+    request_id: int,
+) -> GroupConnectionRequest | None:
+    row = conn.execute(_GROUP_REQUEST_QUERY, (request_id,)).fetchone()
+    return _row_to_group_connection_request(row) if row is not None else None
+
+
+def get_group_connection_state(
+    group_id: int,
+    viewer_id: int,
+    member_id: int,
+) -> tuple[str, GroupConnectionRequest | None]:
+    """Состояние знакомства: available/pending_sent/pending_received/connected."""
+    if viewer_id == member_id:
+        return "self", None
+    with get_connection() as conn:
+        eligible = conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM interest_group_members
+            WHERE group_id = ? AND user_id IN (?, ?)
+            """,
+            (group_id, viewer_id, member_id),
+        ).fetchone()["amount"]
+        if eligible != 2:
+            return "unavailable", None
+        blocked = conn.execute(
+            """
+            SELECT 1 FROM blocks
+            WHERE (blocker = ? AND blocked = ?)
+               OR (blocker = ? AND blocked = ?)
+            """,
+            (viewer_id, member_id, member_id, viewer_id),
+        ).fetchone()
+        if blocked is not None:
+            return "unavailable", None
+        row = conn.execute(
+            """
+            SELECT id, from_user, to_user, status
+            FROM group_connection_requests
+            WHERE group_id = ?
+              AND ((from_user = ? AND to_user = ?)
+                OR (from_user = ? AND to_user = ?))
+            ORDER BY CASE status
+                       WHEN 'accepted' THEN 0
+                       WHEN 'pending' THEN 1
+                       ELSE 2
+                     END,
+                     id DESC
+            LIMIT 1
+            """,
+            (group_id, viewer_id, member_id, member_id, viewer_id),
+        ).fetchone()
+        if row is None:
+            return "available", None
+        request = _get_group_connection_request(conn, row["id"])
+        if row["status"] == "rejected":
+            return "rejected", request
+        if row["status"] == "accepted":
+            return "connected", request
+        if row["from_user"] == viewer_id:
+            return "pending_sent", request
+        return "pending_received", request
+
+
+def create_group_connection_request(
+    group_id: int,
+    from_user: int,
+    to_user: int,
+) -> tuple[str, GroupConnectionRequest | None]:
+    """Создаёт запрос между двумя участниками активной постоянной группы."""
+    if from_user == to_user:
+        return "unavailable", None
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if _active_group_id(conn, from_user) != group_id:
+            return "unavailable", None
+        eligible = conn.execute(
+            "SELECT 1 FROM interest_group_members WHERE group_id = ? AND user_id = ?",
+            (group_id, to_user),
+        ).fetchone()
+        if eligible is None:
+            return "unavailable", None
+        blocked = conn.execute(
+            """
+            SELECT 1 FROM blocks
+            WHERE (blocker = ? AND blocked = ?)
+               OR (blocker = ? AND blocked = ?)
+            """,
+            (from_user, to_user, to_user, from_user),
+        ).fetchone()
+        if blocked is not None:
+            return "blocked", None
+
+        existing = conn.execute(
+            """
+            SELECT id, from_user, status
+            FROM group_connection_requests
+            WHERE group_id = ?
+              AND ((from_user = ? AND to_user = ?)
+                OR (from_user = ? AND to_user = ?))
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (group_id, from_user, to_user, to_user, from_user),
+        ).fetchone()
+        if existing is not None:
+            request = _get_group_connection_request(conn, existing["id"])
+            if existing["status"] == "accepted":
+                return "connected", request
+            if existing["status"] == "pending":
+                return (
+                    "incoming" if existing["from_user"] == to_user else "already",
+                    request,
+                )
+            return "rejected", request
+
+        sent_last_day = conn.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM requests
+               WHERE from_user = ? AND created_at >= datetime('now', '-24 hours'))
+              +
+              (SELECT COUNT(*) FROM group_connection_requests
+               WHERE from_user = ? AND created_at >= datetime('now', '-24 hours'))
+              AS amount
+            """,
+            (from_user, from_user),
+        ).fetchone()["amount"]
+        if sent_last_day >= DAILY_REQUEST_LIMIT:
+            return "limit", None
+
+        cursor = conn.execute(
+            """
+            INSERT INTO group_connection_requests
+                (group_id, from_user, to_user, status)
+            VALUES (?, ?, ?, 'pending')
+            """,
+            (group_id, from_user, to_user),
+        )
+        return "created", _get_group_connection_request(conn, cursor.lastrowid)
+
+
+def accept_group_connection_request(
+    request_id: int,
+    to_user: int,
+) -> tuple[str, GroupConnectionRequest | None]:
+    """Принимает входящий запрос, если оба пользователя всё ещё в группе."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT id, group_id, from_user, to_user, status
+            FROM group_connection_requests
+            WHERE id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        if row is None or row["to_user"] != to_user:
+            return "unavailable", None
+        if row["status"] != "pending":
+            return "already", _get_group_connection_request(conn, request_id)
+        if (
+            _active_group_id(conn, row["from_user"]) != row["group_id"]
+            or _active_group_id(conn, to_user) != row["group_id"]
+        ):
+            return "unavailable", None
+        blocked = conn.execute(
+            """
+            SELECT 1 FROM blocks
+            WHERE (blocker = ? AND blocked = ?)
+               OR (blocker = ? AND blocked = ?)
+            """,
+            (row["from_user"], to_user, to_user, row["from_user"]),
+        ).fetchone()
+        if blocked is not None:
+            conn.execute(
+                "UPDATE group_connection_requests SET status = 'rejected' WHERE id = ?",
+                (request_id,),
+            )
+            return "unavailable", None
+        conn.execute(
+            "UPDATE group_connection_requests SET status = 'accepted' WHERE id = ?",
+            (request_id,),
+        )
+        return "accepted", _get_group_connection_request(conn, request_id)
+
+
+def reject_group_connection_request(request_id: int, to_user: int) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE group_connection_requests
+            SET status = 'rejected'
+            WHERE id = ? AND to_user = ? AND status = 'pending'
+            """,
+            (request_id, to_user),
+        )
+        return cursor.rowcount > 0
+
+
+def get_group_messages(user_id: int, *, limit: int = 50) -> list[GroupMessage]:
+    """Последние сообщения после момента вступления текущего участника."""
+    limit = min(max(limit, 1), 100)
+    with get_connection() as conn:
+        membership = conn.execute(
+            """
+            SELECT gm.group_id, gm.joined_at
+            FROM interest_group_members gm
+            JOIN interest_groups g ON g.id = gm.group_id
+            WHERE gm.user_id = ? AND g.status = 'active'
+            """,
+            (user_id,),
+        ).fetchone()
+        if membership is None:
+            return []
+        rows = conn.execute(
+            """
+            SELECT m.id, m.group_id, m.user_id, m.message, m.created_at,
+                   u.name AS author_name
+            FROM interest_group_messages m
+            JOIN users u ON u.telegram_id = m.user_id
+            WHERE m.group_id = ? AND m.created_at >= ?
+            ORDER BY m.created_at DESC, m.id DESC
+            LIMIT ?
+            """,
+            (membership["group_id"], membership["joined_at"], limit),
+        ).fetchall()
+    return [
+        GroupMessage(
+            id=row["id"],
+            group_id=row["group_id"],
+            user_id=row["user_id"],
+            author_name=row["author_name"].strip() or UNKNOWN_NAME,
+            text=row["message"],
+            created_at=row["created_at"],
+        )
+        for row in reversed(rows)
+    ]
+
+
+def create_group_message(
+    user_id: int,
+    message: str,
+) -> tuple[str, GroupMessage | None]:
+    """Пишет в активную группу с небольшим антиспам-лимитом."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        group_id = _active_group_id(conn, user_id)
+        if group_id is None:
+            return "unavailable", None
+        recent = conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM interest_group_messages
+            WHERE user_id = ? AND created_at >= datetime('now', '-1 minute')
+            """,
+            (user_id,),
+        ).fetchone()["amount"]
+        if recent >= 6:
+            return "limit", None
+        cursor = conn.execute(
+            """
+            INSERT INTO interest_group_messages (group_id, user_id, message)
+            VALUES (?, ?, ?)
+            """,
+            (group_id, user_id, message),
+        )
+        row = conn.execute(
+            """
+            SELECT m.id, m.group_id, m.user_id, m.message, m.created_at,
+                   u.name AS author_name
+            FROM interest_group_messages m
+            JOIN users u ON u.telegram_id = m.user_id
+            WHERE m.id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+        return "created", GroupMessage(
+            id=row["id"],
+            group_id=row["group_id"],
+            user_id=row["user_id"],
+            author_name=row["author_name"].strip() or UNKNOWN_NAME,
+            text=row["message"],
+            created_at=row["created_at"],
+        )
+
+
+def _group_invite_from_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    viewer_id: int,
+) -> GroupEventInvite:
+    responses = conn.execute(
+        """
+        SELECT r.user_id, r.status, u.name
+        FROM group_event_invite_responses r
+        JOIN users u ON u.telegram_id = r.user_id
+        WHERE r.invite_id = ?
+        ORDER BY r.updated_at, r.user_id
+        """,
+        (row["invite_id"],),
+    ).fetchall()
+    my_response = next(
+        (item["status"] for item in responses if item["user_id"] == viewer_id),
+        None,
+    )
+    return GroupEventInvite(
+        id=row["invite_id"],
+        group_id=row["group_id"],
+        event=_row_to_event(row),
+        created_by=row["created_by"],
+        creator_name=row["creator_name"].strip() or UNKNOWN_NAME,
+        created_at=row["invite_created_at"],
+        my_response=my_response,
+        going_names=[
+            item["name"].strip() or UNKNOWN_NAME
+            for item in responses
+            if item["status"] == "going"
+        ],
+        declined_count=sum(item["status"] == "declined" for item in responses),
+    )
+
+
+_GROUP_INVITE_QUERY = """
+    SELECT e.*, gi.id AS invite_id, gi.group_id, gi.created_by,
+           gi.created_at AS invite_created_at,
+           creator.name AS creator_name
+    FROM group_event_invites gi
+    JOIN events e ON e.id = gi.event_id
+    JOIN users creator ON creator.telegram_id = gi.created_by
+"""
+
+
+def get_group_event_invites(
+    user_id: int,
+    *,
+    limit: int = 10,
+) -> list[GroupEventInvite]:
+    limit = min(max(limit, 1), 25)
+    with get_connection() as conn:
+        group_id = _active_group_id(conn, user_id)
+        if group_id is None:
+            return []
+        rows = conn.execute(
+            _GROUP_INVITE_QUERY
+            + """
+              WHERE gi.group_id = ?
+                AND e.status = 'active'
+                AND COALESCE(e.end_date, e.date) > datetime('now', 'localtime')
+              ORDER BY gi.created_at DESC, gi.id DESC
+              LIMIT ?
+            """,
+            (group_id, limit),
+        ).fetchall()
+        return [_group_invite_from_row(conn, row, user_id) for row in rows]
+
+
+def create_group_event_invite(
+    user_id: int,
+    event_id: int,
+) -> tuple[str, GroupEventInvite | None]:
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        group_id = _active_group_id(conn, user_id)
+        if group_id is None:
+            return "unavailable", None
+        event = conn.execute(
+            """
+            SELECT 1 FROM events
+            WHERE id = ? AND status = 'active'
+              AND COALESCE(end_date, date) > datetime('now', 'localtime')
+            """,
+            (event_id,),
+        ).fetchone()
+        if event is None:
+            return "event_unavailable", None
+        existing = conn.execute(
+            "SELECT id FROM group_event_invites WHERE group_id = ? AND event_id = ?",
+            (group_id, event_id),
+        ).fetchone()
+        if existing is None:
+            cursor = conn.execute(
+                """
+                INSERT INTO group_event_invites (group_id, event_id, created_by)
+                VALUES (?, ?, ?)
+                """,
+                (group_id, event_id, user_id),
+            )
+            invite_id = cursor.lastrowid
+            result = "created"
+        else:
+            invite_id = existing["id"]
+            result = "already"
+        conn.execute(
+            """
+            INSERT INTO group_event_invite_responses (invite_id, user_id, status)
+            VALUES (?, ?, 'going')
+            ON CONFLICT(invite_id, user_id) DO UPDATE SET
+                status = 'going', updated_at = datetime('now')
+            """,
+            (invite_id, user_id),
+        )
+        row = conn.execute(
+            _GROUP_INVITE_QUERY + " WHERE gi.id = ?",
+            (invite_id,),
+        ).fetchone()
+        return result, _group_invite_from_row(conn, row, user_id)
+
+
+def respond_group_event_invite(
+    user_id: int,
+    invite_id: int,
+    response: str,
+) -> tuple[str, GroupEventInvite | None]:
+    if response not in {"going", "declined"}:
+        return "unavailable", None
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            _GROUP_INVITE_QUERY
+            + """
+              JOIN interest_group_members gm ON gm.group_id = gi.group_id
+              JOIN interest_groups g ON g.id = gi.group_id
+              WHERE gi.id = ? AND gm.user_id = ? AND g.status = 'active'
+            """,
+            (invite_id, user_id),
+        ).fetchone()
+        if row is None:
+            return "unavailable", None
+        conn.execute(
+            """
+            INSERT INTO group_event_invite_responses (invite_id, user_id, status)
+            VALUES (?, ?, ?)
+            ON CONFLICT(invite_id, user_id) DO UPDATE SET
+                status = excluded.status, updated_at = datetime('now')
+            """,
+            (invite_id, user_id, response),
+        )
+        return "updated", _group_invite_from_row(conn, row, user_id)
 
 
 def _score(event: Event, interests: set[str], avoid: set[str]) -> int:
@@ -1990,6 +2602,16 @@ def block_user(blocker: int, blocked: int) -> bool:
         conn.execute(
             """
             UPDATE requests
+            SET status = 'rejected'
+            WHERE status = 'pending'
+              AND ((from_user = ? AND to_user = ?)
+                OR (from_user = ? AND to_user = ?))
+            """,
+            (blocker, blocked, blocked, blocker),
+        )
+        conn.execute(
+            """
+            UPDATE group_connection_requests
             SET status = 'rejected'
             WHERE status = 'pending'
               AND ((from_user = ? AND to_user = ?)

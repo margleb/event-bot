@@ -168,6 +168,32 @@ class GroupConnectionRequest(BaseModel):
     from_username: Optional[str] = None
     to_username: Optional[str] = None
     common_interests: list[str] = Field(default_factory=list)
+    status: str = "pending"
+
+
+class GroupMessage(BaseModel):
+    """Сообщение во встроенном чате постоянной группы."""
+
+    id: int
+    group_id: int
+    user_id: int
+    author_name: str
+    text: str
+    created_at: str
+
+
+class GroupEventInvite(BaseModel):
+    """Предложение сходить на мероприятие внутри постоянной группы."""
+
+    id: int
+    group_id: int
+    event: Event
+    created_by: int
+    creator_name: str
+    created_at: str
+    my_response: Optional[str] = None
+    going_names: list[str] = Field(default_factory=list)
+    declined_count: int = 0
 
 
 # Отметка + само событие: то, что возвращает db.get_user_intents

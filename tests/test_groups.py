@@ -90,3 +90,75 @@ def test_existing_membership_is_idempotent(temp_db, user_factory):
     assert second.group.id == first.group.id
     assert second.joined is False
     assert second.notify_user_ids == []
+
+
+def test_group_connection_requires_consent_before_contact_is_available(
+    temp_db,
+    user_factory,
+):
+    users = [
+        user_factory(interests=["Кино"], username=f"member{index}")[0]
+        for index in range(3)
+    ]
+    assignments = [_join(user_id) for user_id in users]
+    group_id = assignments[-1].group.id
+
+    status, request = db.create_group_connection_request(
+        group_id,
+        users[0],
+        users[1],
+    )
+
+    assert status == "created"
+    assert request is not None
+    assert db.get_group_connection_state(group_id, users[0], users[1])[0] == "pending_sent"
+    assert db.get_group_connection_state(group_id, users[1], users[0])[0] == "pending_received"
+
+    accepted, contact = db.accept_group_connection_request(request.id, users[1])
+    assert accepted == "accepted"
+    assert contact is not None
+    assert contact.from_username == "member0"
+    assert contact.to_username == "member1"
+    assert db.get_group_connection_state(group_id, users[0], users[1])[0] == "connected"
+
+
+def test_group_chat_and_invites_are_visible_only_to_members(
+    temp_db,
+    user_factory,
+    event_factory,
+):
+    users = [user_factory(interests=["Театр"])[0] for _ in range(3)]
+    assignments = [_join(user_id) for user_id in users]
+    group_id = assignments[-1].group.id
+    outsider, _ = user_factory(interests=["Спорт"])
+    event_id = event_factory(title="Премьера")
+
+    message_status, message = db.create_group_message(users[0], "Встречаемся у входа?")
+    invite_status, invite = db.create_group_event_invite(users[0], event_id)
+
+    assert message_status == "created"
+    assert message is not None and message.group_id == group_id
+    assert [item.text for item in db.get_group_messages(users[1])] == ["Встречаемся у входа?"]
+    assert db.get_group_messages(outsider) == []
+    assert invite_status == "created"
+    assert invite is not None and invite.my_response == "going"
+    assert db.get_group_event_invites(outsider) == []
+
+    response_status, updated = db.respond_group_event_invite(
+        users[1],
+        invite.id,
+        "going",
+    )
+    assert response_status == "updated"
+    assert updated is not None
+    assert len(updated.going_names) == 2
+
+
+def test_group_chat_has_short_anti_spam_limit(temp_db, user_factory):
+    users = [user_factory(interests=["Лекции"])[0] for _ in range(3)]
+    [_join(user_id) for user_id in users]
+
+    for index in range(6):
+        assert db.create_group_message(users[0], f"Сообщение {index}")[0] == "created"
+
+    assert db.create_group_message(users[0], "Седьмое сообщение")[0] == "limit"

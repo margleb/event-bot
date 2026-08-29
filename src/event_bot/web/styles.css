@@ -154,6 +154,46 @@ button { border: 0; cursor: pointer; }
 .group-disabled-art i:nth-child(3) { right: 0; }
 .group-disabled h3 { margin: 0 0 8px; font-family: Georgia, serif; font-size: 27px; }
 .group-disabled p { max-width: 310px; margin: 0 auto 20px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.group-primary-actions { margin: 12px 0 0; }
+.group-primary-actions .primary-button { background: var(--coral); color: white; }
+.group-primary-actions .primary-button span { font-size: 20px; font-weight: 400; }
+.group-subheading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.group-subheading h3 { margin: 0; font-family: Georgia, serif; font-size: 24px; font-weight: 500; line-height: 1.05; }
+.group-subheading > button { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; background: var(--paper); font-size: 20px; }
+.group-event-picker, .group-invites, .group-chat { margin-top: 18px; padding: 17px; border: 1px solid var(--line); border-radius: 23px; background: var(--surface); }
+.group-event-picker { display: grid; gap: 8px; }
+.group-event-picker .group-subheading { margin-bottom: 5px; }
+.group-picker-event { display: grid; gap: 4px; padding: 13px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper); text-align: left; }
+.group-picker-event span, .group-invite-open span { color: var(--coral); font-size: 9px; font-weight: 900; letter-spacing: .4px; text-transform: uppercase; }
+.group-picker-event strong, .group-invite-open strong { font-family: Georgia, serif; font-size: 17px; font-weight: 500; line-height: 1.12; }
+.group-picker-event small, .group-invite-open small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.group-invites { display: grid; gap: 10px; }
+.group-invites > .group-subheading { margin-bottom: 4px; }
+.group-invite-card { padding: 14px; border-radius: 17px; background: var(--paper); }
+.group-invite-open { width: 100%; display: grid; gap: 5px; padding: 0; background: transparent; text-align: left; }
+.group-invite-card > p { margin: 12px 0 5px; color: var(--muted); font-size: 11px; }
+.invite-attendance { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.invite-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 12px; }
+.invite-actions button, .member-action { min-height: 36px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 10px; font-weight: 800; text-decoration: none; }
+.invite-actions button.active, .member-action.accept { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.member-action { display: inline-flex; align-items: center; justify-content: center; margin-top: 9px; }
+.member-action.connected { border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); color: var(--blue); }
+.member-action:disabled { color: var(--muted); opacity: .65; cursor: default; }
+.member-response { display: flex; gap: 6px; flex-wrap: wrap; }
+.group-chat { padding-bottom: 13px; }
+.group-chat .group-subheading { margin-bottom: 13px; }
+.chat-list { max-height: 330px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding: 3px 1px 10px; }
+.chat-message { max-width: 86%; align-self: flex-start; padding: 10px 12px; border-radius: 5px 16px 16px; background: var(--paper); }
+.chat-message.me { align-self: flex-end; border-radius: 16px 5px 16px 16px; background: color-mix(in srgb, var(--blue) 13%, var(--surface)); }
+.chat-message b { display: block; margin-bottom: 3px; color: var(--coral); font-size: 9px; }
+.chat-message.me b { color: var(--blue); }
+.chat-message p { margin: 0; font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-message time { display: block; margin-top: 4px; color: var(--muted); font-size: 8px; text-align: right; }
+.chat-form { display: grid; grid-template-columns: 1fr 43px; gap: 8px; align-items: end; margin-top: 7px; }
+.chat-form textarea { min-height: 43px; max-height: 120px; resize: vertical; padding: 11px 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); color: var(--ink); font: inherit; font-size: 12px; line-height: 1.35; }
+.chat-form button { width: 43px; height: 43px; border-radius: 14px; background: var(--ink); color: var(--paper); font-size: 20px; }
+.chat-form button:disabled { opacity: .5; }
+.group-empty-copy { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 
 .admin-heading { align-items: center; }
 .admin-refresh { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); font-size: 23px; line-height: 1; }

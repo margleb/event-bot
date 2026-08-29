@@ -2,11 +2,14 @@ import hashlib
 import hmac
 import json
 import time
+from unittest.mock import AsyncMock
 from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
 
 from event_bot.analytics import build_admin_report, get_recent_feedback
+import event_bot.db as db
+import event_bot.webapp as webapp_module
 from event_bot.webapp import app, validate_init_data
 
 
@@ -269,3 +272,94 @@ def test_event_intent_and_visibility(
     assert selected.json()["intent"] == "going"
     assert visible.status_code == 200
     assert visible.json()["visible"] is True
+
+
+def test_group_api_supports_contact_invite_and_chat(
+    temp_db,
+    monkeypatch,
+    user_factory,
+    event_factory,
+):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.setattr(
+        webapp_module,
+        "notify_group_connection_request",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        webapp_module,
+        "notify_group_connection_accepted",
+        AsyncMock(return_value=2),
+    )
+    monkeypatch.setattr(
+        webapp_module,
+        "notify_group_event_invite",
+        AsyncMock(return_value=2),
+    )
+    monkeypatch.setattr(
+        webapp_module,
+        "notify_group_message",
+        AsyncMock(return_value=2),
+    )
+    users = [
+        user_factory(
+            user_id=user_id,
+            interests=["Концерты"],
+            username=f"member{user_id}",
+        )[0]
+        for user_id in (42, 43, 44)
+    ]
+    for user_id in users:
+        assert db.set_group_matching_enabled(user_id, True)
+        assert db.assign_user_to_interest_group(user_id) is not None
+    event_id = event_factory(title="Совместный концерт")
+
+    with TestClient(app) as client:
+        first_group = client.get("/r/api/group", headers=auth_headers(users[0])).json()
+        target = next(member for member in first_group["members"] if member["name"] == "User 43")
+        assert target["contact"] is None
+        assert target["member_key"] != str(users[1])
+        assert len(target["member_key"]) == 24
+        requested = client.post(
+            f"/r/api/group/connections/{target['member_key']}",
+            headers=auth_headers(users[0]),
+        )
+        second_group = client.get("/r/api/group", headers=auth_headers(users[1])).json()
+        incoming = next(member for member in second_group["members"] if member["name"] == "User 42")
+        assert incoming["contact"] is None
+        accepted = client.post(
+            f"/r/api/group/connections/{incoming['request_id']}/accept",
+            headers=auth_headers(users[1]),
+        )
+        message = client.post(
+            "/r/api/group/messages",
+            headers=auth_headers(users[0]),
+            json={"message": "Встречаемся у метро"},
+        )
+        invitation = client.post(
+            "/r/api/group/invites",
+            headers=auth_headers(users[0]),
+            json={"event_id": event_id},
+        )
+        invite_id = invitation.json()["group"]["invites"][0]["id"]
+        response = client.put(
+            f"/r/api/group/invites/{invite_id}/response",
+            headers=auth_headers(users[1]),
+            json={"status": "going"},
+        )
+
+    assert requested.status_code == 200
+    assert accepted.status_code == 200
+    connected = next(
+        member
+        for member in accepted.json()["group"]["members"]
+        if member["name"] == "User 42"
+    )
+    assert connected["connection_state"] == "connected"
+    assert connected["contact"]["url"] == "https://t.me/member42"
+    assert message.status_code == 200
+    assert message.json()["group"]["messages"][-1]["message"] == "Встречаемся у метро"
+    assert invitation.status_code == 200
+    assert response.status_code == 200
+    assert response.json()["group"]["invites"][0]["my_response"] == "going"
+    assert db.get_user_intent(users[1], event_id).status == "going"

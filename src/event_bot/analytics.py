@@ -49,6 +49,13 @@ EVENT_LABELS = {
     "miniapp.intent.going": "Mini App: «Пойду»",
     "miniapp.intent.not_going": "Mini App: «Не подходит»",
     "miniapp.visibility": "Настройка видимости",
+    "miniapp.group.connection.created": "Группа: запрос знакомства",
+    "miniapp.group.connection.accepted": "Группа: знакомство принято",
+    "miniapp.group.connection.rejected": "Группа: знакомство отклонено",
+    "miniapp.group.message.sent": "Группа: сообщение в чате",
+    "miniapp.group.invite.created": "Группа: предложено мероприятие",
+    "miniapp.group.invite.going": "Группа: ответ «Иду»",
+    "miniapp.group.invite.declined": "Группа: ответ «Не смогу»",
     "feedback.submitted": "Отправка обратной связи",
 }
 

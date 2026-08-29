@@ -31,17 +31,27 @@ from event_bot.analytics import create_feedback, is_admin, notify_admins, record
 from event_bot.db import (
     INTENT_STATUSES,
     PARTICIPATING_STATUSES,
+    accept_group_connection_request,
     assign_user_to_interest_group,
+    create_group_connection_request,
+    create_group_event_invite,
+    create_group_message,
     find_events,
     get_digest_schedule,
     get_event,
+    get_group_connection_state,
+    get_group_event_invites,
     get_group_matching_enabled,
+    get_group_messages,
+    get_interest_group_member_ids,
     get_user_interest_group,
     get_user_intent,
     get_user_intents,
     get_user_profile,
     get_user_profile_embeddings,
     init_db,
+    reject_group_connection_request,
+    respond_group_event_invite,
     save_intent,
     save_user_profile,
     set_digest_schedule,
@@ -54,7 +64,13 @@ from event_bot.embedding_provider import (
     profile_embedding_text,
     vector_to_blob,
 )
-from event_bot.group_notifications import notify_group_assignment
+from event_bot.group_notifications import (
+    notify_group_assignment,
+    notify_group_connection_accepted,
+    notify_group_connection_request,
+    notify_group_event_invite,
+    notify_group_message,
+)
 from event_bot.models import Event, Profile, UserIntent, format_group_size
 from event_bot.source_branding import source_brand
 
@@ -149,6 +165,26 @@ class IntentUpdate(BaseModel):
 
 class VisibilityUpdate(BaseModel):
     visible: bool
+
+
+class GroupMessageCreate(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("message")
+    @classmethod
+    def normalize_group_message(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("сообщение пустое")
+        return normalized
+
+
+class GroupInviteCreate(BaseModel):
+    event_id: int = Field(gt=0)
+
+
+class GroupInviteResponseUpdate(BaseModel):
+    status: Literal["going", "declined"]
 
 
 class FeedbackCreate(BaseModel):
@@ -301,6 +337,34 @@ def _event_payload(event: Event, intent: UserIntent | None = None) -> dict[str, 
     }
 
 
+def _group_member_key(group_id: int, member_id: int) -> str:
+    """Неподделываемый идентификатор участника без раскрытия Telegram ID."""
+    digest = hmac.new(
+        os.environ.get("BOT_TOKEN", "").encode("utf-8"),
+        f"group:{group_id}:member:{member_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return digest[:24]
+
+
+def _connection_contact(
+    member_id: int,
+    request,
+) -> dict[str, str] | None:
+    if request is None or request.status != "accepted":
+        return None
+    if member_id == request.from_user:
+        name, username = request.from_name, request.from_username
+    else:
+        name, username = request.to_name, request.to_username
+    url = (
+        f"https://t.me/{username.lstrip('@')}"
+        if username
+        else f"tg://user?id={member_id}"
+    )
+    return {"name": name, "url": url}
+
+
 def _group_payload(user_id: int, profile: Profile | None) -> dict[str, object] | None:
     if profile is None:
         return None
@@ -308,6 +372,43 @@ def _group_payload(user_id: int, profile: Profile | None) -> dict[str, object] |
     if view is None:
         return None
     group = view.group
+    members: list[dict[str, object]] = []
+    for member in view.members:
+        is_me = member.user_id == user_id
+        connection_state, connection_request = (
+            ("self", None)
+            if is_me
+            else get_group_connection_state(group.id, user_id, member.user_id)
+        )
+        members.append(
+            {
+                "name": "Вы" if is_me else member.name,
+                "is_me": is_me,
+                "member_key": (
+                    None if is_me else _group_member_key(group.id, member.user_id)
+                ),
+                "common_interests": member.common_interests,
+                "group_size": format_group_size(
+                    member.group_size_min,
+                    member.group_size_max,
+                ),
+                "connection_state": connection_state,
+                "request_id": (
+                    connection_request.id
+                    if connection_request is not None
+                    and connection_state == "pending_received"
+                    else None
+                ),
+                "contact": (
+                    _connection_contact(member.user_id, connection_request)
+                    if connection_state == "connected"
+                    else None
+                ),
+            }
+        )
+
+    invites = get_group_event_invites(user_id)
+    messages = get_group_messages(user_id)
     return {
         "id": group.id,
         "title": group.title,
@@ -316,19 +417,59 @@ def _group_payload(user_id: int, profile: Profile | None) -> dict[str, object] |
         "member_count": group.member_count,
         "minimum_members": group.minimum_members,
         "maximum_members": group.maximum_members,
-        "members": [
+        "can_interact": group.status == "active",
+        "members": members,
+        "invites": [
             {
-                "name": "Вы" if member.user_id == user_id else member.name,
-                "is_me": member.user_id == user_id,
-                "common_interests": member.common_interests,
-                "group_size": format_group_size(
-                    member.group_size_min,
-                    member.group_size_max,
+                "id": invite.id,
+                "event": _event_payload(
+                    invite.event,
+                    get_user_intent(user_id, invite.event.id),
                 ),
+                "creator_name": (
+                    "Вы" if invite.created_by == user_id else invite.creator_name
+                ),
+                "created_at": invite.created_at,
+                "my_response": invite.my_response,
+                "going_names": invite.going_names,
+                "declined_count": invite.declined_count,
             }
-            for member in view.members
+            for invite in invites
+        ],
+        "messages": [
+            {
+                "id": message.id,
+                "author_name": (
+                    "Вы" if message.user_id == user_id else message.author_name
+                ),
+                "is_me": message.user_id == user_id,
+                "message": message.text,
+                "created_at": message.created_at,
+            }
+            for message in messages
         ],
     }
+
+
+def _resolve_group_member(user_id: int, member_key: str) -> tuple[int, int]:
+    """Проверяет opaque-ключ и возвращает (group_id, target_user_id)."""
+    view = get_user_interest_group(user_id)
+    if view is None or view.group.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Group is not ready")
+    for member in view.members:
+        if member.user_id == user_id:
+            continue
+        expected = _group_member_key(view.group.id, member.user_id)
+        if hmac.compare_digest(expected, member_key):
+            return view.group.id, member.user_id
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Group member not found")
+
+
+def _fresh_group(user_id: int) -> dict[str, object]:
+    payload = _group_payload(user_id, get_user_profile(user_id))
+    if payload is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Group is unavailable")
+    return payload
 
 
 def _bootstrap(user: TelegramUser) -> dict[str, object]:
@@ -562,6 +703,138 @@ def update_visibility(
     updated = get_user_intent(user.id, event_id)
     assert updated is not None
     return _event_payload(updated.event, updated)
+
+
+@app.get(f"{BASE_PATH}/api/group")
+def group_state(
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    return _fresh_group(user.id)
+
+
+@app.post(f"{BASE_PATH}/api/group/connections/{{member_key}}")
+async def request_group_connection(
+    member_key: str,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    group_id, target_user_id = _resolve_group_member(user.id, member_key)
+    result, request = create_group_connection_request(
+        group_id,
+        user.id,
+        target_user_id,
+    )
+    if result == "incoming" and request is not None:
+        result, request = accept_group_connection_request(request.id, user.id)
+    if result in {"created", "accepted"} and request is not None:
+        bot = Bot(token=os.environ["BOT_TOKEN"])
+        try:
+            if result == "created":
+                await notify_group_connection_request(bot, request)
+            else:
+                await notify_group_connection_accepted(bot, request)
+        finally:
+            await bot.session.close()
+        record_usage(user.id, f"miniapp.group.connection.{result}", "miniapp")
+    elif result == "limit":
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много запросов за сутки")
+    elif result in {"blocked", "unavailable", "rejected"}:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Сейчас познакомиться не получится")
+    return {"status": result, "group": _fresh_group(user.id)}
+
+
+@app.post(f"{BASE_PATH}/api/group/connections/{{request_id}}/accept")
+async def accept_group_connection(
+    request_id: int,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    result, request = accept_group_connection_request(request_id, user.id)
+    if result == "unavailable" or request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    if result == "accepted":
+        bot = Bot(token=os.environ["BOT_TOKEN"])
+        try:
+            await notify_group_connection_accepted(bot, request)
+        finally:
+            await bot.session.close()
+        record_usage(user.id, "miniapp.group.connection.accepted", "miniapp")
+    return {"status": result, "group": _fresh_group(user.id)}
+
+
+@app.post(f"{BASE_PATH}/api/group/connections/{{request_id}}/reject")
+def reject_group_connection(
+    request_id: int,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    if not reject_group_connection_request(request_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    record_usage(user.id, "miniapp.group.connection.rejected", "miniapp")
+    return {"status": "rejected", "group": _fresh_group(user.id)}
+
+
+@app.post(f"{BASE_PATH}/api/group/messages")
+async def send_group_message(
+    payload: GroupMessageCreate,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    result, message = create_group_message(user.id, payload.message)
+    if result == "limit":
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много сообщений подряд")
+    if result != "created" or message is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Group chat is unavailable")
+    bot = Bot(token=os.environ["BOT_TOKEN"])
+    try:
+        await notify_group_message(
+            bot,
+            message,
+            get_interest_group_member_ids(message.group_id),
+        )
+    finally:
+        await bot.session.close()
+    record_usage(user.id, "miniapp.group.message.sent", "miniapp")
+    return {"status": "created", "group": _fresh_group(user.id)}
+
+
+@app.post(f"{BASE_PATH}/api/group/invites")
+async def create_event_invite(
+    payload: GroupInviteCreate,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    result, invite = create_group_event_invite(user.id, payload.event_id)
+    if result == "event_unavailable":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    if result == "unavailable" or invite is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Group is unavailable")
+    if result == "created":
+        bot = Bot(token=os.environ["BOT_TOKEN"])
+        try:
+            await notify_group_event_invite(
+                bot,
+                invite,
+                get_interest_group_member_ids(invite.group_id),
+            )
+        finally:
+            await bot.session.close()
+        record_usage(user.id, "miniapp.group.invite.created", "miniapp")
+    return {"status": result, "group": _fresh_group(user.id)}
+
+
+@app.put(f"{BASE_PATH}/api/group/invites/{{invite_id}}/response")
+def respond_to_event_invite(
+    invite_id: int,
+    payload: GroupInviteResponseUpdate,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    result, invite = respond_group_event_invite(user.id, invite_id, payload.status)
+    if result != "updated" or invite is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invite not found")
+    if payload.status == "going":
+        save_intent(user.id, invite.event.id, "going")
+    record_usage(
+        user.id,
+        f"miniapp.group.invite.{payload.status}",
+        "miniapp",
+    )
+    return {"status": result, "group": _fresh_group(user.id)}
 
 
 @app.exception_handler(HTTPException)
