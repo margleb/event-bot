@@ -21,6 +21,11 @@
   const LONG_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
   const WEEKDAYS = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
   const GLYPHS = ["♪", "◌", "✦", "◇", "∿"];
+  const SOURCE_BRANDS = {
+    kudago: { name: "KudaGo", mark: "K" },
+    timepad: { name: "timepad", mark: "tp" },
+    ticketmaster: { name: "Ticketmaster", mark: "★" },
+  };
   const LOCAL_PREVIEW = {
     user: { id: 1, first_name: "Дима", username: "preview", photo_url: null },
     is_admin: true,
@@ -42,9 +47,9 @@
       ],
     },
     events: [
-      { id: 101, title: "Джаз на крыше: вечерний концерт", description: "Живая музыка, закат над Москвой и камерная атмосфера. В программе — современный джаз и авторские аранжировки.", city: "Москва", address: "Берсеневская набережная, 6", date: "2026-09-04T19:30:00", end_date: null, price: "от 1 800 ₽", tags: ["джаз", "концерт", "на крыше"], venue: "Красный Октябрь", source_url: "https://kudago.com/", intent: "interested", visible: false },
-      { id: 102, title: "Новая Третьяковка: искусство XX века", description: "Большая экспозиция русского искусства XX века и специальная кураторская программа выходного дня.", city: "Москва", address: "Крымский Вал, 10", date: "2026-09-05T13:00:00", end_date: null, price: "700 ₽", tags: ["выставка", "искусство", "музей"], venue: "Новая Третьяковка", source_url: "https://kudago.com/", intent: null, visible: false },
-      { id: 103, title: "Открытый микрофон на Китай-городе", description: "Начинающие и опытные комики проверяют новый материал в небольшом клубе.", city: "Москва", address: "Покровка, 17", date: "2026-09-06T20:00:00", end_date: null, price: "Бесплатно", tags: ["стендап", "комедия"], venue: "Клуб 17", source_url: "https://kudago.com/", intent: "going", visible: true },
+      { id: 101, title: "Джаз на крыше: вечерний концерт", description: "Живая музыка, закат над Москвой и камерная атмосфера. В программе — современный джаз и авторские аранжировки.", city: "Москва", address: "Берсеневская набережная, 6", date: "2026-09-04T19:30:00", end_date: null, price: "от 1 800 ₽", tags: ["джаз", "концерт", "на крыше"], venue: "Красный Октябрь", source_url: "https://kudago.com/", source_id: "kudago", source_name: "KudaGo", source_mark: "K", intent: "interested", visible: false },
+      { id: 102, title: "Новая Третьяковка: искусство XX века", description: "Большая экспозиция русского искусства XX века и специальная кураторская программа выходного дня.", city: "Москва", address: "Крымский Вал, 10", date: "2026-09-05T13:00:00", end_date: null, price: "700 ₽", tags: ["выставка", "искусство", "музей"], venue: "Новая Третьяковка", source_url: "https://timepad.ru/", source_id: "timepad", source_name: "timepad", source_mark: "tp", intent: null, visible: false },
+      { id: 103, title: "Открытый микрофон на Китай-городе", description: "Начинающие и опытные комики проверяют новый материал в небольшом клубе.", city: "Москва", address: "Покровка, 17", date: "2026-09-06T20:00:00", end_date: null, price: "Бесплатно", tags: ["стендап", "комедия"], venue: "Клуб 17", source_url: "https://ticketmaster.com/", source_id: "ticketmaster", source_name: "Ticketmaster", source_mark: "★", intent: "going", visible: true },
     ],
     my_events: [],
   };
@@ -164,6 +169,13 @@
     return Math.abs(hash) % 5;
   }
 
+  function sourceBadge(event) {
+    const id = Object.hasOwn(SOURCE_BRANDS, event.source_id) ? event.source_id : "other";
+    const fallback = { name: event.source_name || "Источник", mark: event.source_mark || "↗" };
+    const brand = SOURCE_BRANDS[id] || fallback;
+    return `<span class="source-badge source-${id}"><i>${escapeHtml(brand.mark)}</i><b>${escapeHtml(brand.name)}</b></span>`;
+  }
+
   function formatWhen(raw, long = false) {
     const date = new Date(raw);
     if (long) return `${date.getDate()} ${LONG_MONTHS[date.getMonth()]}, ${WEEKDAYS[date.getDay()]} · ${date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`;
@@ -188,6 +200,7 @@
     return `
       <article class="event-card" data-event-id="${event.id}">
         <div class="card-visual variant-${variant}">
+          ${sourceBadge(event)}
           <span class="event-glyph">${GLYPHS[variant]}</span>
           <div class="date-tile"><b>${date.day}</b><span>${date.month}</span></div>
           <span class="visual-price">${escapeHtml(event.price)}</span>
@@ -561,6 +574,7 @@
     const source = $("#modal-source");
     source.classList.toggle("hidden", !event.source_url);
     source.href = event.source_url || "#";
+    source.innerHTML = `${sourceBadge(event)}<span>Открыть оригинал ↗</span>`;
     $("#modal-actions").innerHTML = eventActions(event);
     $("#event-modal").classList.remove("hidden");
     document.body.style.overflow = "hidden";

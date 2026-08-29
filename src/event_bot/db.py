@@ -24,6 +24,7 @@ from event_bot.models import (
     UserIntent,
     format_group_size,
 )
+from event_bot.source_branding import source_brand
 
 # Файл базы лежит в data/ в корне проекта: три parent — это
 # db.py -> event_bot -> src -> корень
@@ -1165,6 +1166,36 @@ def _preferred_weekday_numbers(days: list[str] | None) -> set[int]:
     }
 
 
+def _deduplicate_candidates(
+    candidates: list[tuple[Event, sqlite3.Row]],
+) -> list[tuple[Event, sqlite3.Row]]:
+    """Схлопывает один анонс, попавший сразу из нескольких каталогов."""
+    selected: dict[tuple[str, datetime], tuple[Event, sqlite3.Row]] = {}
+
+    def completeness(event: Event) -> tuple[int, int]:
+        filled = sum(
+            bool(value)
+            for value in (
+                event.description,
+                event.venue,
+                event.address,
+                event.source_url,
+                event.price_text,
+                event.tags,
+            )
+        )
+        return filled, len(event.description)
+
+    for candidate in candidates:
+        event = candidate[0]
+        normalized_title = " ".join(event.title.casefold().split())
+        key = (normalized_title, event.date)
+        current = selected.get(key)
+        if current is None or completeness(event) > completeness(current[0]):
+            selected[key] = candidate
+    return list(selected.values())
+
+
 def _rank_by_embeddings(
     candidates: list[tuple[Event, sqlite3.Row]],
     profile_embedding: bytes | None,
@@ -1272,6 +1303,7 @@ def find_events(
             # Одна повреждённая строка не должна ломать /find для всех
             # пользователей. Импорт валидирует новые даты отдельно.
             logger.exception("Пропущено повреждённое событие id=%s", row["id"])
+    candidates = _deduplicate_candidates(candidates)
     semantic = _rank_by_embeddings(
         candidates,
         profile_embedding,
@@ -1309,9 +1341,13 @@ def _format_source_link(event: Event) -> str:
     if not event.source_url:
         return ""
     source_url = escape(event.source_url, quote=True)
-    source_name = "KudaGo" if event.source_id == "kudago" else event.source_id
-    source_name = escape(source_name or "сайт события")
-    return f'🔗 <a href="{source_url}">Источник: {source_name}</a>'
+    brand = source_brand(event.source_id)
+    source_name = escape(brand.name)
+    source_mark = escape(brand.mark)
+    return (
+        f"<b>{source_mark} {source_name}</b> · "
+        f'<a href="{source_url}">открыть источник ↗</a>'
+    )
 
 
 def format_event_card(event: Event, index: int) -> str:

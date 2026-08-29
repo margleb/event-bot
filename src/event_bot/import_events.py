@@ -1,9 +1,18 @@
+import os
 import sys
 from dataclasses import dataclass
 from time import perf_counter
 
 from event_bot.db import init_db, upsert_source_events
-from event_bot.sources import EventSource, KudaGoSource, SourceFetchError
+from dotenv import load_dotenv
+
+from event_bot.sources import (
+    EventSource,
+    KudaGoSource,
+    SourceFetchError,
+    TicketmasterSource,
+    TimepadSource,
+)
 
 
 @dataclass
@@ -56,22 +65,39 @@ def run_import(source: EventSource | None = None) -> ImportStats:
     return stats
 
 
-def main() -> None:
-    started = perf_counter()
-    try:
-        stats = run_import()
-    except SourceFetchError as error:
-        stats = ImportStats(errors=1, elapsed=perf_counter() - started)
-        print(f"Импорт не выполнен: {error}", file=sys.stderr)
-        print(stats.format(), file=sys.stderr)
-        raise SystemExit(1) from error
-    except Exception as error:
-        stats = ImportStats(errors=1, elapsed=perf_counter() - started)
-        print(f"Импорт не выполнен: {error}", file=sys.stderr)
-        print(stats.format(), file=sys.stderr)
-        raise SystemExit(1) from error
+def configured_sources() -> list[EventSource]:
+    """Официальные API; закрытые ключи включают дополнительные каталоги."""
+    sources: list[EventSource] = [KudaGoSource()]
+    timepad_token = os.getenv("TIMEPAD_API_TOKEN", "").strip()
+    if timepad_token:
+        sources.append(TimepadSource(timepad_token))
+    ticketmaster_key = os.getenv("TICKETMASTER_API_KEY", "").strip()
+    if ticketmaster_key:
+        sources.append(TicketmasterSource(ticketmaster_key))
+    return sources
 
-    print(stats.format())
+
+def main() -> None:
+    load_dotenv()
+    failed = False
+    for source in configured_sources():
+        started = perf_counter()
+        try:
+            stats = run_import(source)
+        except SourceFetchError as error:
+            failed = True
+            stats = ImportStats(errors=1, elapsed=perf_counter() - started)
+            print(f"{source.source_id}: импорт не выполнен: {error}", file=sys.stderr)
+            print(f"{source.source_id}: {stats.format()}", file=sys.stderr)
+            continue
+        except Exception as error:
+            failed = True
+            stats = ImportStats(errors=1, elapsed=perf_counter() - started)
+            print(f"{source.source_id}: импорт не выполнен: {error}", file=sys.stderr)
+            print(f"{source.source_id}: {stats.format()}", file=sys.stderr)
+            continue
+        print(f"{source.source_id}: {stats.format()}")
+    raise SystemExit(1 if failed else 0)
 
 
 if __name__ == "__main__":

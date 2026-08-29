@@ -173,12 +173,13 @@ class EventImportDatabaseTests(unittest.TestCase):
         self.assertEqual([item.title for item in found], ["Обновлённый концерт"])
         card = db.format_event_card(found[0], 1)
         self.assertIn("Клуб, ул. Музыкальная, 1", card)
-        self.assertIn("Источник: KudaGo", card)
+        self.assertIn("K KudaGo", card)
+        self.assertIn("открыть источник", card)
         self.assertIn('href="https://kudago.com/msk/event/real/"', card)
         intent_card = db.format_intent_card(
             UserIntent(event=found[0], status="going", visible=True)
         )
-        self.assertIn("Источник: KudaGo", intent_card)
+        self.assertIn("K KudaGo", intent_card)
 
     def test_find_includes_started_but_not_finished_event(self) -> None:
         ongoing = self.event(

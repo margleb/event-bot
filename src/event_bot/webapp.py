@@ -56,6 +56,7 @@ from event_bot.embedding_provider import (
 )
 from event_bot.group_notifications import notify_group_assignment
 from event_bot.models import Event, Profile, UserIntent, format_group_size
+from event_bot.source_branding import source_brand
 
 
 BASE_PATH = "/r"
@@ -279,6 +280,7 @@ def _profile_payload(profile: Profile | None) -> dict[str, object] | None:
 
 
 def _event_payload(event: Event, intent: UserIntent | None = None) -> dict[str, object]:
+    brand = source_brand(event.source_id)
     return {
         "id": event.id,
         "title": event.title,
@@ -291,6 +293,9 @@ def _event_payload(event: Event, intent: UserIntent | None = None) -> dict[str, 
         "tags": event.tags,
         "venue": event.venue,
         "source_url": event.source_url,
+        "source_id": event.source_id,
+        "source_name": brand.name,
+        "source_mark": brand.mark,
         "intent": intent.status if intent else None,
         "visible": intent.visible if intent else False,
     }

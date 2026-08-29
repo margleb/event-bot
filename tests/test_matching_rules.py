@@ -4,7 +4,7 @@ import numpy as np
 
 import event_bot.db as db
 from event_bot.embedding_provider import vector_to_blob
-from event_bot.models import Profile
+from event_bot.models import Event, Profile
 
 
 def test_budget_filter_wins_over_maximum_embedding_similarity(event_factory):
@@ -102,3 +102,34 @@ def test_profile_days_filter_events_before_ranking(event_factory):
     found = db.find_events(Profile(interests=["музыка"], days=["mon"]))
 
     assert [event.title for event in found] == ["В понедельник"]
+
+
+def test_same_event_from_two_sources_is_shown_once(temp_db):
+    common = {
+        "title": "Один и тот же концерт",
+        "description": "Коротко",
+        "city": "Москва",
+        "address": "",
+        "date": datetime(2099, 1, 2, 19, 0),
+        "tags": ["музыка"],
+        "venue": "Клуб",
+        "status": "active",
+    }
+    kudago = Event(
+        **common,
+        source_id="kudago",
+        external_id="one",
+        source_url="https://kudago.com/msk/event/one/",
+    )
+    timepad = Event(
+        **{**common, "description": "Более подробное описание концерта"},
+        source_id="timepad",
+        external_id="two",
+        source_url="https://example.timepad.ru/event/two/",
+    )
+    db.upsert_source_events([kudago, timepad])
+
+    found = db.find_events(Profile(interests=["музыка"]))
+
+    assert len(found) == 1
+    assert found[0].source_id == "timepad"
