@@ -17,6 +17,7 @@ from event_bot.sources.base import EventSource, SourceFetchError
 
 
 TIMEPAD_EVENTS_URL = "https://api.timepad.ru/v1/events.json"
+TIMEPAD_USER_AGENT = "event-bot/1.0 (+https://bot-ams.margleb.ru)"
 TIMEPAD_FIELDS = (
     "id",
     "starts_at",
@@ -72,6 +73,8 @@ class TimepadSource(EventSource):
                     headers={
                         "Accept": "application/json",
                         "Authorization": f"Bearer {self.api_token}",
+                        # Timepad rejects urllib's default user agent at its WAF.
+                        "User-Agent": TIMEPAD_USER_AGENT,
                     },
                 )
                 with self.opener(request, timeout=self.timeout) as response:

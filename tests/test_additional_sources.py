@@ -6,7 +6,7 @@ from urllib.request import Request
 
 from event_bot.import_events import configured_sources
 from event_bot.sources.ticketmaster import TicketmasterSource
-from event_bot.sources.timepad import TIMEPAD_FIELDS, TimepadSource
+from event_bot.sources.timepad import TIMEPAD_FIELDS, TIMEPAD_USER_AGENT, TimepadSource
 
 
 class JsonResponse(io.BytesIO):
@@ -39,6 +39,7 @@ def test_timepad_fetch_uses_token_and_documented_filters():
     assert source.fetch() == [{"id": 1}]
     request = calls[0]
     assert request.get_header("Authorization") == "Bearer secret-token"
+    assert request.get_header("User-agent") == TIMEPAD_USER_AGENT
     query = parse_qs(urlparse(request.full_url).query)
     assert query["cities"] == ["Москва"]
     assert query["limit"] == ["100"]
