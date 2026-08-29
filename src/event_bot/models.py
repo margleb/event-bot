@@ -131,11 +131,12 @@ class InterestGroup(BaseModel):
     status: str
     topics: list[str] = Field(default_factory=list)
     member_count: int
+    minimum_members: int = 3
+    maximum_members: int = 5
 
     @property
     def title(self) -> str:
-        topics = ", ".join(self.topics) or "новые знакомства"
-        return f"Клуб: {topics}"
+        return " · ".join(self.topics) or "Новые знакомства"
 
 
 class InterestGroupView(BaseModel):

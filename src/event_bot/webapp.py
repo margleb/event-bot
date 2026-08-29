@@ -28,9 +28,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from event_bot.db import (
     INTENT_STATUSES,
     PARTICIPATING_STATUSES,
+    assign_user_to_interest_group,
     find_events,
     get_digest_schedule,
     get_event,
+    get_group_matching_enabled,
+    get_user_interest_group,
     get_user_intent,
     get_user_intents,
     get_user_profile,
@@ -39,6 +42,7 @@ from event_bot.db import (
     save_intent,
     save_user_profile,
     set_digest_schedule,
+    set_group_matching_enabled,
     set_intent_visibility,
     update_user_identity,
 )
@@ -47,7 +51,8 @@ from event_bot.embedding_provider import (
     profile_embedding_text,
     vector_to_blob,
 )
-from event_bot.models import Event, Profile, UserIntent
+from event_bot.group_notifications import notify_group_assignment
+from event_bot.models import Event, Profile, UserIntent, format_group_size
 
 
 BASE_PATH = "/r"
@@ -85,6 +90,7 @@ class ProfileUpdate(BaseModel):
     preferred_group_size_min: int | None = Field(default=None, ge=1, le=100)
     preferred_group_size_max: int | None = Field(default=None, ge=1, le=100)
     digest_weekday: int | None = Field(default=None, ge=0, le=6)
+    group_matching_enabled: bool = False
 
     @field_validator("interests", "avoid")
     @classmethod
@@ -119,6 +125,17 @@ class ProfileUpdate(BaseModel):
             and self.preferred_group_size_min > self.preferred_group_size_max
         ):
             raise ValueError("минимальный размер компании больше максимального")
+        if self.group_matching_enabled:
+            if (
+                self.preferred_group_size_max is not None
+                and self.preferred_group_size_max < 3
+            ):
+                raise ValueError("для группы выберите компанию минимум от 3 человек")
+            if (
+                self.preferred_group_size_min is not None
+                and self.preferred_group_size_min > 5
+            ):
+                raise ValueError("группы собираются максимум из 5 человек")
         return self
 
 
@@ -234,6 +251,36 @@ def _event_payload(event: Event, intent: UserIntent | None = None) -> dict[str, 
     }
 
 
+def _group_payload(user_id: int, profile: Profile | None) -> dict[str, object] | None:
+    if profile is None:
+        return None
+    view = get_user_interest_group(user_id, profile)
+    if view is None:
+        return None
+    group = view.group
+    return {
+        "id": group.id,
+        "title": group.title,
+        "status": group.status,
+        "topics": group.topics,
+        "member_count": group.member_count,
+        "minimum_members": group.minimum_members,
+        "maximum_members": group.maximum_members,
+        "members": [
+            {
+                "name": "Вы" if member.user_id == user_id else member.name,
+                "is_me": member.user_id == user_id,
+                "common_interests": member.common_interests,
+                "group_size": format_group_size(
+                    member.group_size_min,
+                    member.group_size_max,
+                ),
+            }
+            for member in view.members
+        ],
+    }
+
+
 def _bootstrap(user: TelegramUser) -> dict[str, object]:
     profile = get_user_profile(user.id)
     if profile is not None:
@@ -260,6 +307,8 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
         },
         "profile": _profile_payload(profile),
         "digest_weekday": get_digest_schedule(user.id) if profile else None,
+        "group_matching_enabled": get_group_matching_enabled(user.id),
+        "group": _group_payload(user.id, profile),
         "events": [
             _event_payload(event, intents_by_event.get(event.id))
             for event in recommendations
@@ -366,6 +415,18 @@ async def update_profile(
         avoid_embedding_model=embeddings[3],
     )
     set_digest_schedule(user.id, payload.digest_weekday)
+    set_group_matching_enabled(user.id, payload.group_matching_enabled)
+    assignment = (
+        assign_user_to_interest_group(user.id)
+        if payload.group_matching_enabled
+        else None
+    )
+    if assignment is not None and assignment.notify_user_ids:
+        bot = Bot(token=os.environ["BOT_TOKEN"])
+        try:
+            await notify_group_assignment(bot, assignment)
+        finally:
+            await bot.session.close()
     return _bootstrap(user)
 
 

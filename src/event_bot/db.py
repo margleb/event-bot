@@ -2,6 +2,7 @@
 import json
 import logging
 import sqlite3
+from collections import Counter
 from contextlib import contextmanager
 from datetime import date, datetime
 from html import escape
@@ -16,6 +17,9 @@ from event_bot.models import (
     Companion,
     ConnectionRequest,
     Event,
+    GroupAssignment,
+    InterestGroup,
+    InterestGroupView,
     Profile,
     UserIntent,
     format_group_size,
@@ -38,6 +42,11 @@ AVOID_SIMILARITY_WEIGHT = 0.5
 
 # Сколько других участников показываем по кнопке «Кто идёт»
 MAX_COMPANIONS = 5
+
+# Постоянные группы активируются после набора трёх совместимых участников
+# и больше пяти человек не разрастаются.
+GROUP_MIN_MEMBERS = 3
+GROUP_MAX_MEMBERS = 5
 
 # Не больше пяти новых запросов за скользящие 24 часа.
 DAILY_REQUEST_LIMIT = 5
@@ -167,6 +176,27 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS interest_groups (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                status       TEXT NOT NULL DEFAULT 'forming',
+                topics       TEXT NOT NULL DEFAULT '[]',
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                activated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interest_group_members (
+                group_id  INTEGER NOT NULL,
+                user_id   INTEGER NOT NULL,
+                joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (group_id, user_id)
+            )
+            """
+        )
+        conn.execute(
+            """
             -- Мероприятия. date хранится текстом "ГГГГ-ММ-ДД ЧЧ:ММ:СС",
             -- такой формат корректно сравнивается с datetime('now')
             CREATE TABLE IF NOT EXISTS events (
@@ -256,6 +286,12 @@ def init_db() -> None:
         )
         _add_column_if_missing(conn, "users", "last_digest_date", "TEXT")
         _add_column_if_missing(
+            conn,
+            "users",
+            "group_matching_enabled",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _add_column_if_missing(
             conn, "intents", "visibility_asked", "INTEGER NOT NULL DEFAULT 0"
         )
         # Поля импорта nullable: строки старой схемы должны сохраниться как есть.
@@ -297,6 +333,14 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_requests_pair_status "
             "ON requests(from_user, to_user, status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_user "
+            "ON interest_group_members(user_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_groups_status "
+            "ON interest_groups(status, created_at)"
         )
 
 
@@ -503,6 +547,361 @@ def mark_digest_sent(telegram_id: int, sent_on: date) -> None:
             """,
             (sent_on.isoformat(), telegram_id),
         )
+
+
+def get_group_matching_enabled(telegram_id: int) -> bool:
+    """Дал ли пользователь согласие на постоянный групповой подбор."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT group_matching_enabled FROM users WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+    return bool(row["group_matching_enabled"]) if row is not None else False
+
+
+def _group_from_row(row: sqlite3.Row) -> InterestGroup:
+    return InterestGroup(
+        id=row["id"],
+        status=row["status"],
+        topics=json.loads(row["topics"]),
+        member_count=row["member_count"],
+        minimum_members=GROUP_MIN_MEMBERS,
+        maximum_members=GROUP_MAX_MEMBERS,
+    )
+
+
+def _group_row(
+    conn: sqlite3.Connection,
+    group_id: int,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT g.*, COUNT(gm.user_id) AS member_count
+        FROM interest_groups g
+        LEFT JOIN interest_group_members gm ON gm.group_id = g.id
+        WHERE g.id = ?
+        GROUP BY g.id
+        """,
+        (group_id,),
+    ).fetchone()
+
+
+def _recompute_group_topics(conn: sqlite3.Connection, group_id: int) -> list[str]:
+    """Три самые частые темы участников, с исходным регистром первого автора."""
+    rows = conn.execute(
+        """
+        SELECT u.interests
+        FROM interest_group_members gm
+        JOIN users u ON u.telegram_id = gm.user_id
+        WHERE gm.group_id = ?
+        ORDER BY gm.joined_at, gm.user_id
+        """,
+        (group_id,),
+    ).fetchall()
+    counts: Counter[str] = Counter()
+    display: dict[str, str] = {}
+    for row in rows:
+        try:
+            interests = json.loads(row["interests"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for interest in interests:
+            if not isinstance(interest, str) or not interest.strip():
+                continue
+            value = interest.strip()
+            key = value.casefold()
+            counts[key] += 1
+            display.setdefault(key, value)
+
+    shared = [key for key, amount in counts.items() if amount >= 2]
+    source = shared or list(counts)
+    ordered = sorted(source, key=lambda key: (-counts[key], display[key].casefold()))
+    topics = [display[key] for key in ordered[:3]]
+    conn.execute(
+        "UPDATE interest_groups SET topics = ? WHERE id = ?",
+        (json.dumps(topics, ensure_ascii=False), group_id),
+    )
+    return topics
+
+
+def _effective_group_capacity(conn: sqlite3.Connection, group_id: int) -> int:
+    rows = conn.execute(
+        """
+        SELECT u.group_size_max
+        FROM interest_group_members gm
+        JOIN users u ON u.telegram_id = gm.user_id
+        WHERE gm.group_id = ?
+          AND u.group_size_max IS NOT NULL
+        """,
+        (group_id,),
+    ).fetchall()
+    limits = [row["group_size_max"] for row in rows if row["group_size_max"] >= 3]
+    return min([GROUP_MAX_MEMBERS, *limits])
+
+
+def _leave_group_in_connection(
+    conn: sqlite3.Connection,
+    telegram_id: int,
+) -> bool:
+    row = conn.execute(
+        "SELECT group_id FROM interest_group_members WHERE user_id = ?",
+        (telegram_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    group_id = row["group_id"]
+    conn.execute(
+        "DELETE FROM interest_group_members WHERE user_id = ?",
+        (telegram_id,),
+    )
+    amount = conn.execute(
+        "SELECT COUNT(*) AS amount FROM interest_group_members WHERE group_id = ?",
+        (group_id,),
+    ).fetchone()["amount"]
+    if amount == 0:
+        conn.execute("DELETE FROM interest_groups WHERE id = ?", (group_id,))
+    else:
+        _recompute_group_topics(conn, group_id)
+        if amount < GROUP_MIN_MEMBERS:
+            conn.execute(
+                """
+                UPDATE interest_groups
+                SET status = 'forming', activated_at = NULL
+                WHERE id = ?
+                """,
+                (group_id,),
+            )
+    return True
+
+
+def set_group_matching_enabled(telegram_id: int, enabled: bool) -> bool:
+    """Меняет согласие; отключение одновременно удаляет членство."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            """
+            UPDATE users
+            SET group_matching_enabled = ?
+            WHERE telegram_id = ?
+            """,
+            (int(enabled), telegram_id),
+        )
+        if cursor.rowcount and not enabled:
+            _leave_group_in_connection(conn, telegram_id)
+    return cursor.rowcount > 0
+
+
+def leave_interest_group(telegram_id: int) -> bool:
+    """Добровольно выходит из постоянной группы, не удаляя профиль."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        return _leave_group_in_connection(conn, telegram_id)
+
+
+def assign_user_to_interest_group(telegram_id: int) -> GroupAssignment | None:
+    """Атомарно вступает в лучшую совместимую группу или создаёт новую."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = conn.execute(
+            """
+            SELECT telegram_id, interests, group_size_min, group_size_max,
+                   group_matching_enabled
+            FROM users
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+        if user is None or not user["group_matching_enabled"]:
+            return None
+
+        existing = conn.execute(
+            "SELECT group_id FROM interest_group_members WHERE user_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if existing is not None:
+            _recompute_group_topics(conn, existing["group_id"])
+            row = _group_row(conn, existing["group_id"])
+            return (
+                GroupAssignment(group=_group_from_row(row), joined=False)
+                if row is not None
+                else None
+            )
+
+        try:
+            raw_interests = json.loads(user["interests"])
+        except (TypeError, json.JSONDecodeError):
+            raw_interests = []
+        interests = {
+            value.strip().casefold()
+            for value in raw_interests
+            if isinstance(value, str) and value.strip()
+        }
+        if not interests:
+            return None
+
+        rows = conn.execute(
+            """
+            SELECT g.*, COUNT(gm.user_id) AS member_count
+            FROM interest_groups g
+            LEFT JOIN interest_group_members gm ON gm.group_id = g.id
+            GROUP BY g.id
+            HAVING member_count < ?
+            ORDER BY CASE g.status WHEN 'forming' THEN 0 ELSE 1 END,
+                     member_count DESC, g.created_at, g.id
+            """,
+            (GROUP_MAX_MEMBERS,),
+        ).fetchall()
+
+        candidates: list[tuple[int, int, int, int]] = []
+        for row in rows:
+            try:
+                topics = {
+                    value.strip().casefold()
+                    for value in json.loads(row["topics"])
+                    if isinstance(value, str) and value.strip()
+                }
+            except (TypeError, json.JSONDecodeError):
+                continue
+            overlap = len(interests & topics)
+            if overlap == 0:
+                continue
+            target_size = row["member_count"] + 1
+            user_max = user["group_size_max"]
+            if user_max is not None and target_size > user_max:
+                continue
+            if target_size > _effective_group_capacity(conn, row["id"]):
+                continue
+            blocked = conn.execute(
+                """
+                SELECT 1
+                FROM interest_group_members gm
+                JOIN blocks b
+                  ON (b.blocker = ? AND b.blocked = gm.user_id)
+                  OR (b.blocker = gm.user_id AND b.blocked = ?)
+                WHERE gm.group_id = ?
+                LIMIT 1
+                """,
+                (telegram_id, telegram_id, row["id"]),
+            ).fetchone()
+            if blocked is not None:
+                continue
+            forming_bonus = 1 if row["status"] == "forming" else 0
+            candidates.append(
+                (overlap, forming_bonus, row["member_count"], row["id"])
+            )
+
+        if candidates:
+            group_id = max(candidates, key=lambda item: item[:3])[3]
+        else:
+            topics = [
+                value.strip()
+                for value in raw_interests
+                if isinstance(value, str) and value.strip()
+            ][:3]
+            cursor = conn.execute(
+                "INSERT INTO interest_groups (topics) VALUES (?)",
+                (json.dumps(topics, ensure_ascii=False),),
+            )
+            group_id = cursor.lastrowid
+
+        conn.execute(
+            "INSERT INTO interest_group_members (group_id, user_id) VALUES (?, ?)",
+            (group_id, telegram_id),
+        )
+        _recompute_group_topics(conn, group_id)
+        row = _group_row(conn, group_id)
+        if row is None:
+            return None
+
+        newly_activated = (
+            row["status"] == "forming"
+            and row["member_count"] >= GROUP_MIN_MEMBERS
+        )
+        if newly_activated:
+            conn.execute(
+                """
+                UPDATE interest_groups
+                SET status = 'active', activated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (group_id,),
+            )
+            row = _group_row(conn, group_id)
+
+        group = _group_from_row(row)
+        notify_user_ids: list[int] = []
+        if newly_activated or group.status == "active":
+            notify_user_ids = [
+                item["user_id"]
+                for item in conn.execute(
+                    """
+                    SELECT user_id
+                    FROM interest_group_members
+                    WHERE group_id = ?
+                    ORDER BY joined_at, user_id
+                    """,
+                    (group_id,),
+                ).fetchall()
+            ]
+        return GroupAssignment(
+            group=group,
+            newly_activated=newly_activated,
+            joined=True,
+            notify_user_ids=notify_user_ids,
+        )
+
+
+def get_user_interest_group(
+    telegram_id: int,
+    profile: Profile | None = None,
+) -> InterestGroupView | None:
+    """Постоянная группа пользователя и её участники."""
+    profile = profile or get_user_profile(telegram_id)
+    if profile is None:
+        return None
+    with get_connection() as conn:
+        membership = conn.execute(
+            "SELECT group_id FROM interest_group_members WHERE user_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if membership is None:
+            return None
+        group_row = _group_row(conn, membership["group_id"])
+        if group_row is None:
+            return None
+        rows = conn.execute(
+            """
+            SELECT u.telegram_id, u.name, u.interests,
+                   u.group_size_min, u.group_size_max
+            FROM interest_group_members gm
+            JOIN users u ON u.telegram_id = gm.user_id
+            WHERE gm.group_id = ?
+            ORDER BY gm.joined_at, gm.user_id
+            """,
+            (membership["group_id"],),
+        ).fetchall()
+
+    mine = {interest.casefold() for interest in profile.interests}
+    members: list[Companion] = []
+    for row in rows:
+        try:
+            their_interests = json.loads(row["interests"])
+        except (TypeError, json.JSONDecodeError):
+            their_interests = []
+        members.append(
+            Companion(
+                user_id=row["telegram_id"],
+                name=row["name"].strip() or UNKNOWN_NAME,
+                common_interests=[
+                    interest
+                    for interest in their_interests
+                    if isinstance(interest, str) and interest.casefold() in mine
+                ],
+                group_size_min=row["group_size_min"],
+                group_size_max=row["group_size_max"],
+            )
+        )
+    return InterestGroupView(group=_group_from_row(group_row), members=members)
 
 
 def _row_to_event(row: sqlite3.Row) -> Event:

@@ -1,6 +1,7 @@
 # src/event_bot/handlers.py
 import logging
 import os
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
@@ -14,6 +15,7 @@ from event_bot.db import (
     INTENT_STATUS_LABELS,
     PARTICIPATING_STATUSES,
     accept_connection_request,
+    assign_user_to_interest_group,
     block_user,
     create_connection_request,
     find_companions,
@@ -24,6 +26,8 @@ from event_bot.db import (
     format_intent_card,
     format_request_notification,
     get_digest_schedule,
+    get_group_matching_enabled,
+    get_user_interest_group,
     get_user_intent,
     get_user_intents,
     get_user_profile,
@@ -43,6 +47,7 @@ from event_bot.embedding_provider import (
     profile_embedding_text,
     vector_to_blob,
 )
+from event_bot.group_notifications import notify_group_assignment
 from event_bot.keyboards import (
     companion_keyboard,
     digest_weekday_keyboard,
@@ -54,7 +59,7 @@ from event_bot.keyboards import (
     show_me_keyboard,
     visibility_keyboard,
 )
-from event_bot.models import Profile
+from event_bot.models import InterestGroupView, Profile, format_group_size
 from event_bot.profile_service import (
     ProfileExtractor,
     build_profile_input,
@@ -132,7 +137,7 @@ async def start(message: Message) -> None:
         "какой бюджет и какая компания комфортна.\n\n"
         "Потом /find — подберу мероприятия, /profile — покажу профиль,\n"
         "/schedule — настроит еженедельную подборку,\n"
-        "/my — что ты уже отметил.",
+        "/my — что ты уже отметил, /group — твоя постоянная группа.",
         reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
     )
 
@@ -251,6 +256,65 @@ async def show_digest_schedule(message: Message) -> None:
     await message.answer(text, reply_markup=digest_weekday_keyboard())
 
 
+def _format_interest_group(view: InterestGroupView, user_id: int) -> str:
+    group = view.group
+    if group.status == "active":
+        status_line = "✅ Группа собрана"
+    else:
+        missing = max(0, group.minimum_members - group.member_count)
+        status_line = f"⏳ Набираем группу · осталось участников: {missing}"
+    topics = ", ".join(group.topics) or "новые знакомства"
+    members = []
+    for member in view.members:
+        name = "Вы" if member.user_id == user_id else member.name
+        common = ", ".join(member.common_interests) or "знакомимся"
+        company = format_group_size(member.group_size_min, member.group_size_max)
+        members.append(
+            f"• <b>{escape(name)}</b> · {escape(common)} · компания {escape(company)}"
+        )
+    return (
+        f"<b>{escape(group.title)}</b>\n"
+        f"{status_line}\n"
+        f"Темы: {escape(topics)}\n"
+        f"Участников: {group.member_count}/{group.maximum_members}\n\n"
+        + "\n".join(members)
+    )
+
+
+@router.message(Command("group"))
+async def show_interest_group(
+    message: Message,
+    profile_store: ProfileStore,
+) -> None:
+    if message.from_user is None:
+        return
+    user_id = message.from_user.id
+    profile = _load_profile(user_id, profile_store)
+    if profile is None:
+        await message.answer(NO_PROFILE_TEXT)
+        return
+    miniapp_url = os.getenv("MINIAPP_URL", "").strip()
+    if not get_group_matching_enabled(user_id):
+        await message.answer(
+            "Подбор постоянной группы выключен. Открой профиль в приложении "
+            "и включи «Подобрать компанию».",
+            reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
+        )
+        return
+
+    assignment = assign_user_to_interest_group(user_id)
+    await notify_group_assignment(message.bot, assignment)
+    view = get_user_interest_group(user_id, profile)
+    if view is None:
+        await message.answer("Пока не удалось создать группу. Попробуй чуть позже.")
+        return
+    await message.answer(
+        _format_interest_group(view, user_id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
+    )
+
+
 # F.text — любое текстовое сообщение, не подошедшее под фильтры выше:
 # считаем, что человек рассказывает о своих предпочтениях
 @router.message(F.text)
@@ -358,6 +422,9 @@ async def confirm_profile(
         avoid_embedding=avoid_embedding,
         avoid_embedding_model=(embedding_model if avoid_embedding else None),
     )
+    if get_group_matching_enabled(user_id):
+        assignment = assign_user_to_interest_group(user_id)
+        await notify_group_assignment(callback.bot, assignment)
 
     # callback.message пустой у очень старых сообщений — отсюда проверка типа
     if isinstance(callback.message, Message):

@@ -60,12 +60,16 @@ def user_factory(temp_db):
         username: str | None = None,
         confirmed: bool = True,
         budget_rub: int | None = None,
+        group_size_min: int | None = None,
+        group_size_max: int | None = None,
     ) -> tuple[int, Profile]:
         user_id = user_id if user_id is not None else next(ids)
         profile = Profile(
             interests=interests or ["музыка"],
             avoid=avoid or [],
             budget_rub=budget_rub,
+            preferred_group_size_min=group_size_min,
+            preferred_group_size_max=group_size_max,
         )
         if confirmed:
             db.save_user_profile(

@@ -113,7 +113,62 @@ def test_profile_bootstrap_and_schedule(temp_db, monkeypatch):
     assert body["profile"]["interests"] == ["Театр", "Выставки"]
     assert body["profile"]["days"] == ["fri", "sat"]
     assert body["digest_weekday"] == 4
+    assert body["group_matching_enabled"] is False
+    assert body["group"] is None
     assert body["user"]["first_name"] == "Мария"
+
+
+def test_profile_can_opt_in_to_interest_group(temp_db, monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    payload = {
+        "interests": ["Концерты", "Выставки"],
+        "avoid": [],
+        "days": ["sat"],
+        "budget_rub": 2500,
+        "preferred_group_size_min": 3,
+        "preferred_group_size_max": 5,
+        "digest_weekday": None,
+        "group_matching_enabled": True,
+    }
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/r/api/profile",
+            headers=auth_headers(),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["group_matching_enabled"] is True
+    assert body["group"]["status"] == "forming"
+    assert body["group"]["member_count"] == 1
+    assert body["group"]["members"][0]["is_me"] is True
+
+
+def test_group_opt_in_rejects_incompatible_company_size(temp_db, monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    payload = {
+        "interests": ["Театр"],
+        "avoid": [],
+        "days": [],
+        "budget_rub": None,
+        "preferred_group_size_min": 1,
+        "preferred_group_size_max": 2,
+        "digest_weekday": None,
+        "group_matching_enabled": True,
+    }
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/r/api/profile",
+            headers=auth_headers(),
+            json=payload,
+        )
+
+    assert response.status_code == 422
 
 
 def test_event_intent_and_visibility(

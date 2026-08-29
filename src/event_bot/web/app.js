@@ -29,6 +29,17 @@
       preferred_group_size_min: 2, preferred_group_size_max: 5,
     },
     digest_weekday: 4,
+    group_matching_enabled: true,
+    group: {
+      id: 12, title: "Концерты · Выставки", status: "active",
+      topics: ["Концерты", "Выставки"], member_count: 3,
+      minimum_members: 3, maximum_members: 5,
+      members: [
+        { name: "Вы", is_me: true, common_interests: ["Концерты", "Выставки"], group_size: "2–5 человек" },
+        { name: "Аня", is_me: false, common_interests: ["Концерты"], group_size: "3–5 человек" },
+        { name: "Максим", is_me: false, common_interests: ["Выставки"], group_size: "3–5 человек" },
+      ],
+    },
     events: [
       { id: 101, title: "Джаз на крыше: вечерний концерт", description: "Живая музыка, закат над Москвой и камерная атмосфера. В программе — современный джаз и авторские аранжировки.", city: "Москва", address: "Берсеневская набережная, 6", date: "2026-09-04T19:30:00", end_date: null, price: "от 1 800 ₽", tags: ["джаз", "концерт", "на крыше"], venue: "Красный Октябрь", source_url: "https://kudago.com/", intent: "interested", visible: false },
       { id: 102, title: "Новая Третьяковка: искусство XX века", description: "Большая экспозиция русского искусства XX века и специальная кураторская программа выходного дня.", city: "Москва", address: "Крымский Вал, 10", date: "2026-09-05T13:00:00", end_date: null, price: "700 ₽", tags: ["выставка", "искусство", "музей"], venue: "Новая Третьяковка", source_url: "https://kudago.com/", intent: null, visible: false },
@@ -67,7 +78,12 @@
     });
     let body = {};
     try { body = await response.json(); } catch (_) { /* empty response */ }
-    if (!response.ok) throw new Error(body.detail || "Не удалось выполнить запрос");
+    if (!response.ok) {
+      const detail = Array.isArray(body.detail)
+        ? body.detail.map((item) => item.msg).filter(Boolean).join(" · ")
+        : body.detail;
+      throw new Error(detail || "Не удалось выполнить запрос");
+    }
     return body;
   }
 
@@ -132,7 +148,8 @@
 
   function renderHeader() {
     const user = state.data.user;
-    $("#header-title").textContent = state.tab === "profile" ? "Ваш профиль" : state.tab === "my" ? "Ваши планы" : `Привет, ${user.first_name}!`;
+    const titles = { profile: "Ваш профиль", my: "Ваши планы", group: "Ваша компания" };
+    $("#header-title").textContent = titles[state.tab] || `Привет, ${user.first_name}!`;
     const avatar = $("#avatar");
     avatar.textContent = (user.first_name || "М").slice(0, 1).toUpperCase();
     if (user.photo_url) avatar.innerHTML = `<img src="${escapeHtml(user.photo_url)}" alt="">`;
@@ -162,6 +179,7 @@
     state.group = [profile?.preferred_group_size_min ?? null, profile?.preferred_group_size_max ?? null];
     $("#avoid-input").value = (profile?.avoid || []).join(", ");
     $("#digest-select").value = state.data.digest_weekday ?? "";
+    $("#group-matching-input").checked = Boolean(state.data.group_matching_enabled);
     renderProfileChoices();
   }
 
@@ -183,6 +201,58 @@
     $("#onboarding-copy").classList.toggle("hidden", Boolean(state.data.profile));
   }
 
+  function renderGroup() {
+    const container = $("#group-content");
+    if (!state.data.group_matching_enabled) {
+      container.innerHTML = `
+        <div class="group-disabled">
+          <div class="group-disabled-art" aria-hidden="true"><i></i><i></i><i></i></div>
+          <h3>Компания — только по желанию</h3>
+          <p>Включите подбор в профиле, и мы найдём 3–5 человек с пересекающимися интересами. Выйти можно в любой момент.</p>
+          <button class="primary-button" type="button" data-go-profile>Настроить подбор</button>
+        </div>`;
+      return;
+    }
+
+    const group = state.data.group;
+    if (!group) {
+      container.innerHTML = `<div class="group-disabled"><h3>Начинаем поиск</h3><p>Сохраняем ваши настройки и подбираем совместимую компанию.</p></div>`;
+      return;
+    }
+
+    const ready = group.status === "active";
+    const missing = Math.max(0, group.minimum_members - group.member_count);
+    const progressTarget = ready ? group.maximum_members : group.minimum_members;
+    const progress = Math.min(100, Math.round((group.member_count / progressTarget) * 100));
+    const topics = (group.topics || []).map((topic) => `<span class="tag">${escapeHtml(topic)}</span>`).join("");
+    const members = (group.members || []).map((member) => {
+      const initial = (member.name || "У").slice(0, 1).toLocaleUpperCase("ru");
+      const common = (member.common_interests || []).join(", ");
+      return `
+        <article class="member-card ${member.is_me ? "me" : ""}">
+          <span class="member-avatar">${escapeHtml(initial)}</span>
+          <div>
+            <h4>${escapeHtml(member.name)}</h4>
+            <p>${common ? `Общее: ${escapeHtml(common)}` : "Профиль совместим с группой"} · ${escapeHtml(member.group_size)}</p>
+          </div>
+        </article>`;
+    }).join("");
+    const statusCopy = ready
+      ? "Группа собрана. Она останется вашей, пока вы не выключите подбор в профиле."
+      : `Уже ${group.member_count} из ${group.minimum_members}. ${missing === 1 ? "Ищем ещё одного участника." : `Ищем ещё ${missing} участников.`}`;
+
+    container.innerHTML = `
+      <article class="group-hero">
+        <span class="group-status">${ready ? "ГРУППА СОБРАНА" : "ИДЁТ ПОДБОР"}</span>
+        <h3>${escapeHtml(group.title)}</h3>
+        <p>${statusCopy}</p>
+        <div class="tag-row">${topics}</div>
+        <div class="group-progress"><span style="width:${progress}%"></span></div>
+      </article>
+      <h3 class="group-members-title">Участники · ${group.member_count}/${group.maximum_members}</h3>
+      <div class="member-list">${members}</div>`;
+  }
+
   function setTab(tab) {
     if (!state.data.profile && tab !== "profile") tab = "profile";
     state.tab = tab;
@@ -191,6 +261,7 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
     renderHeader();
     if (tab === "my") renderMy();
+    if (tab === "group") renderGroup();
     if (tab === "profile") renderProfile();
   }
 
@@ -279,6 +350,7 @@
     errorBox.classList.add("hidden");
     const customBudget = $("#budget-input").value.trim();
     const budget = customBudget ? Number(customBudget) : state.budget;
+    const groupMatchingEnabled = $("#group-matching-input").checked;
     if (!state.selectedInterests.size) {
       errorBox.textContent = "Выберите хотя бы один интерес.";
       errorBox.classList.remove("hidden");
@@ -286,6 +358,11 @@
     }
     if (budget !== null && (!Number.isFinite(budget) || budget < 0 || budget > 1000000)) {
       errorBox.textContent = "Проверьте указанную сумму.";
+      errorBox.classList.remove("hidden");
+      return;
+    }
+    if (groupMatchingEnabled && ((state.group[1] !== null && state.group[1] < 3) || (state.group[0] !== null && state.group[0] > 5))) {
+      errorBox.textContent = "Для подбора компании выберите «Неважно» или размер, совместимый с группой 3–5 человек.";
       errorBox.classList.remove("hidden");
       return;
     }
@@ -302,9 +379,10 @@
           days: [...state.selectedDays], budget_rub: budget,
           preferred_group_size_min: state.group[0], preferred_group_size_max: state.group[1],
           digest_weekday: digest === "" ? null : Number(digest),
+          group_matching_enabled: groupMatchingEnabled,
         }),
       });
-      hydrateProfileForm(); renderFeed(); renderMy();
+      hydrateProfileForm(); renderFeed(); renderMy(); renderGroup();
       haptic("medium"); toast("Профиль сохранён"); setTab("feed");
     } catch (error) {
       errorBox.textContent = error.message;
@@ -327,6 +405,8 @@
       if (opener) openModal(Number(opener.dataset.open));
       const visibility = event.target.closest("[data-visible]");
       if (visibility) setVisibility(Number(visibility.dataset.id), visibility.dataset.visible === "true");
+      const groupSettings = event.target.closest("[data-go-profile]");
+      if (groupSettings) setTab("profile");
     });
     $("#interest-chips").addEventListener("click", (event) => {
       const button = event.target.closest("[data-interest]");

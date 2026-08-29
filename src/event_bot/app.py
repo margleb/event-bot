@@ -39,6 +39,7 @@ async def run() -> None:
             BotCommand(command="profile", description="Мои предпочтения"),
             BotCommand(command="schedule", description="Настроить подборку"),
             BotCommand(command="my", description="Мои мероприятия"),
+            BotCommand(command="group", description="Моя группа"),
         ]
     )
     if miniapp_url.startswith("https://"):
