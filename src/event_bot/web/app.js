@@ -87,6 +87,14 @@
     return body;
   }
 
+  function trackMiniapp(event) {
+    if (!tg?.initData) return;
+    void api("/track", {
+      method: "POST",
+      body: JSON.stringify({ event }),
+    }).catch(() => {});
+  }
+
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>'"]/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
@@ -263,6 +271,7 @@
     if (tab === "my") renderMy();
     if (tab === "group") renderGroup();
     if (tab === "profile") renderProfile();
+    trackMiniapp(`tab.${tab}`);
   }
 
   function mergeEvent(updated) {
@@ -326,6 +335,7 @@
     $("#event-modal").classList.remove("hidden");
     document.body.style.overflow = "hidden";
     tg?.BackButton?.show();
+    trackMiniapp("event_details");
   }
 
   function closeModal() {
@@ -393,6 +403,42 @@
     }
   }
 
+  async function sendFeedback() {
+    const input = $("#feedback-input");
+    const statusBox = $("#feedback-status");
+    const button = $("#send-feedback");
+    const message = input.value.trim();
+    statusBox.classList.add("hidden");
+    if (message.length < 3) {
+      statusBox.textContent = "Напишите хотя бы несколько слов.";
+      statusBox.classList.remove("hidden");
+      return;
+    }
+    if (!tg?.initData) {
+      input.value = "";
+      toast("В режиме просмотра сообщение не отправляется");
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "Отправляем…";
+    try {
+      const result = await api("/feedback", {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      });
+      input.value = "";
+      statusBox.textContent = `Спасибо! Обращение #${result.feedback_id} передано команде.`;
+      statusBox.classList.remove("hidden");
+      haptic("medium");
+    } catch (error) {
+      statusBox.textContent = error.message;
+      statusBox.classList.remove("hidden");
+    } finally {
+      button.disabled = false;
+      button.textContent = "Отправить сообщение";
+    }
+  }
+
   function bindEvents() {
     $("#bottom-nav").addEventListener("click", (event) => {
       const button = event.target.closest("[data-tab]");
@@ -407,6 +453,8 @@
       if (visibility) setVisibility(Number(visibility.dataset.id), visibility.dataset.visible === "true");
       const groupSettings = event.target.closest("[data-go-profile]");
       if (groupSettings) setTab("profile");
+      const source = event.target.closest("#modal-source");
+      if (source) trackMiniapp("external_source");
     });
     $("#interest-chips").addEventListener("click", (event) => {
       const button = event.target.closest("[data-interest]");
@@ -435,6 +483,7 @@
     $("#add-interest").addEventListener("click", addInterest);
     $("#custom-interest").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); addInterest(); } });
     $("#profile-form").addEventListener("submit", saveProfile);
+    $("#send-feedback").addEventListener("click", sendFeedback);
     $("#my-filters").addEventListener("click", (event) => {
       const button = event.target.closest("[data-filter]"); if (!button) return;
       state.myFilter = button.dataset.filter;

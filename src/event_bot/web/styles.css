@@ -182,6 +182,14 @@ button { border: 0; cursor: pointer; }
 .digest-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 14px; background: var(--violet); color: white; font-size: 22px; }
 .digest-copy h3 { font-size: 18px; }
 .digest-section select { grid-column: 1 / -1; width: 100%; min-height: 43px; padding: 0 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); outline: none; font-size: 13px; }
+.feedback-section { display: grid; grid-template-columns: 42px 1fr; gap: 11px; align-items: center; }
+.feedback-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 14px; background: var(--coral); color: white; font-family: Georgia, serif; font-size: 25px; }
+.feedback-copy h3 { margin: 0 0 3px; font-family: Georgia, serif; font-size: 19px; }
+.feedback-copy p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.feedback-section textarea { grid-column: 1 / -1; min-height: 92px; resize: vertical; font-family: inherit; line-height: 1.5; }
+.secondary-button { grid-column: 1 / -1; min-height: 43px; border: 1px solid var(--ink); border-radius: 14px; background: transparent; color: var(--ink); font-size: 12px; font-weight: 800; }
+.secondary-button:disabled { opacity: .5; }
+.feedback-status { grid-column: 1 / -1; margin: 0 3px; color: var(--blue); font-size: 11px; line-height: 1.4; }
 .match-card { position: relative; display: grid; grid-template-columns: 52px 1fr 42px; gap: 12px; align-items: center; padding: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); cursor: pointer; }
 .match-card input { position: absolute; opacity: 0; pointer-events: none; }
 .match-art { width: 52px; height: 52px; position: relative; border-radius: 17px; background: color-mix(in srgb, var(--coral) 18%, var(--surface)); }

@@ -158,6 +158,17 @@
               </select>
             </div>
 
+            <div class="form-section feedback-section">
+              <div class="feedback-icon">?</div>
+              <div class="feedback-copy">
+                <h3>Написать команде</h3>
+                <p>Идея, вопрос или проблема — ответ придёт в Telegram</p>
+              </div>
+              <textarea id="feedback-input" class="wide-input" minlength="3" maxlength="2000" rows="4" placeholder="Расскажите, что можно улучшить"></textarea>
+              <button id="send-feedback" class="secondary-button" type="button">Отправить сообщение</button>
+              <p id="feedback-status" class="feedback-status hidden"></p>
+            </div>
+
             <p id="form-error" class="form-error hidden"></p>
             <button id="save-profile" class="primary-button" type="submit">
               <span>Сохранить и подобрать</span><b>→</b>

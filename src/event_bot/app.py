@@ -4,11 +4,17 @@ import os
 from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from event_bot.db import init_db
+from event_bot.analytics import UsageTrackingMiddleware, get_admin_ids
 from event_bot.digest import run_digest_scheduler
 from event_bot.embedding_provider import EmbeddingProvider
 from event_bot.handlers import router
@@ -32,16 +38,27 @@ async def run() -> None:
 
     bot = Bot(token=bot_token)
     miniapp_url = os.getenv("MINIAPP_URL", "").strip()
-    await bot.set_my_commands(
-        [
-            BotCommand(command="start", description="Главное меню"),
-            BotCommand(command="find", description="Подобрать мероприятия"),
-            BotCommand(command="profile", description="Мои предпочтения"),
-            BotCommand(command="schedule", description="Настроить подборку"),
-            BotCommand(command="my", description="Мои мероприятия"),
-            BotCommand(command="group", description="Моя группа"),
-        ]
-    )
+    user_commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="find", description="Подобрать мероприятия"),
+        BotCommand(command="profile", description="Мои предпочтения"),
+        BotCommand(command="schedule", description="Настроить подборку"),
+        BotCommand(command="my", description="Мои мероприятия"),
+        BotCommand(command="group", description="Моя группа"),
+        BotCommand(command="feedback", description="Написать команде"),
+    ]
+    await bot.set_my_commands(user_commands)
+    admin_commands = [
+        *user_commands,
+        BotCommand(command="admin", description="Статистика бота"),
+        BotCommand(command="feedbacks", description="Обращения пользователей"),
+        BotCommand(command="reply", description="Ответить на обращение"),
+    ]
+    for admin_id in get_admin_ids():
+        await bot.set_my_commands(
+            admin_commands,
+            scope=BotCommandScopeChat(chat_id=admin_id),
+        )
     if miniapp_url.startswith("https://"):
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
@@ -61,6 +78,8 @@ async def run() -> None:
     )
     # Dispatcher принимает апдейты от Telegram и раздаёт их роутерам
     dispatcher = Dispatcher()
+    router.message.outer_middleware(UsageTrackingMiddleware())
+    router.callback_query.outer_middleware(UsageTrackingMiddleware())
     dispatcher.include_router(router)
     digest_task = asyncio.create_task(run_digest_scheduler(bot))
 

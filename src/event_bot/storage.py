@@ -22,6 +22,9 @@ class ProfileStore:
     # поэтому сам факт ответа хранится отдельно от nullable-поля Profile.
     awaiting_clarification: dict[int, str] = field(default_factory=dict)
     clarified_fields: dict[int, set[str]] = field(default_factory=dict)
+    # После /feedback следующее обычное сообщение сохраняется как обращение,
+    # а не как новое описание профиля.
+    awaiting_feedback: set[int] = field(default_factory=set)
 
     def clear_clarification(self, user_id: int) -> None:
         """Завершает или отменяет накопленный диалог уточнения."""

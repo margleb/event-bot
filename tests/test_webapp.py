@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
 
+from event_bot.analytics import build_admin_report, get_recent_feedback
 from event_bot.webapp import app, validate_init_data
 
 
@@ -166,6 +167,41 @@ def test_group_opt_in_rejects_incompatible_company_size(temp_db, monkeypatch):
             "/r/api/profile",
             headers=auth_headers(),
             json=payload,
+        )
+
+    assert response.status_code == 422
+
+
+def test_miniapp_tracks_tabs_and_accepts_feedback(temp_db, monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "")
+
+    with TestClient(app) as client:
+        tracked = client.post(
+            "/r/api/track",
+            headers=auth_headers(),
+            json={"event": "tab.group"},
+        )
+        feedback = client.post(
+            "/r/api/feedback",
+            headers=auth_headers(),
+            json={"message": "Добавьте фильтр по району"},
+        )
+
+    assert tracked.status_code == 200
+    assert feedback.status_code == 200
+    assert feedback.json()["feedback_id"] > 0
+    assert get_recent_feedback()[0].message == "Добавьте фильтр по району"
+    assert ("miniapp.tab.group", 1) in build_admin_report()["top_features"]
+
+
+def test_miniapp_rejects_unknown_tracking_event(temp_db, monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    with TestClient(app) as client:
+        response = client.post(
+            "/r/api/track",
+            headers=auth_headers(),
+            json={"event": "arbitrary.private.data"},
         )
 
     assert response.status_code == 422

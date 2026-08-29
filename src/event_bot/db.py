@@ -197,6 +197,33 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                event_name TEXT NOT NULL,
+                source     TEXT NOT NULL,
+                metadata   TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feedback_messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                name        TEXT NOT NULL DEFAULT '',
+                username    TEXT,
+                message     TEXT NOT NULL,
+                source      TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'new',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                answered_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             -- Мероприятия. date хранится текстом "ГГГГ-ММ-ДД ЧЧ:ММ:СС",
             -- такой формат корректно сравнивается с datetime('now')
             CREATE TABLE IF NOT EXISTS events (
@@ -341,6 +368,22 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_groups_status "
             "ON interest_groups(status, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_created "
+            "ON usage_events(created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_user_created "
+            "ON usage_events(user_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_name_created "
+            "ON usage_events(event_name, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feedback_status_created "
+            "ON feedback_messages(status, created_at)"
         )
 
 

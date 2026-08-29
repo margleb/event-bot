@@ -10,6 +10,17 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from openai import OpenAIError
 
+from event_bot.analytics import (
+    build_admin_report,
+    create_feedback,
+    format_admin_report,
+    format_feedback_item,
+    get_feedback,
+    get_recent_feedback,
+    is_admin,
+    mark_feedback_answered,
+    notify_admins,
+)
 from event_bot.db import (
     INTENT_STATUSES,
     INTENT_STATUS_LABELS,
@@ -137,7 +148,8 @@ async def start(message: Message) -> None:
         "какой бюджет и какая компания комфортна.\n\n"
         "Потом /find — подберу мероприятия, /profile — покажу профиль,\n"
         "/schedule — настроит еженедельную подборку,\n"
-        "/my — что ты уже отметил, /group — твоя постоянная группа.",
+        "/my — что ты уже отметил, /group — твоя постоянная группа,\n"
+        "/feedback — написать команде бота.",
         reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
     )
 
@@ -315,6 +327,81 @@ async def show_interest_group(
     )
 
 
+@router.message(Command("feedback"))
+async def start_feedback(message: Message, profile_store: ProfileStore) -> None:
+    """Следующее текстовое сообщение станет обращением к администратору."""
+    if message.from_user is None:
+        return
+    profile_store.awaiting_feedback.add(message.from_user.id)
+    await message.answer(
+        "Напишите одним сообщением идею, вопрос или описание проблемы. "
+        "Я передам его команде бота."
+    )
+
+
+@router.message(Command("admin"))
+async def show_admin_report(message: Message) -> None:
+    if message.from_user is None:
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    await message.answer(
+        format_admin_report(build_admin_report()),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(Command("feedbacks"))
+async def show_feedbacks(message: Message) -> None:
+    if message.from_user is None:
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    items = get_recent_feedback()
+    if not items:
+        await message.answer("Обращений пока нет.")
+        return
+    await message.answer(
+        "💬 <b>Последние обращения</b>\n"
+        "Новые показаны первыми. Ответ: <code>/reply ID текст</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    for item in items:
+        await message.answer(
+            format_feedback_item(item),
+            parse_mode=ParseMode.HTML,
+        )
+
+
+@router.message(Command("reply"))
+async def reply_to_feedback(message: Message) -> None:
+    if message.from_user is None:
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit() or not parts[2].strip():
+        await message.answer("Формат: /reply ID текст ответа")
+        return
+    item = get_feedback(int(parts[1]))
+    if item is None:
+        await message.answer("Обращение с таким ID не найдено.")
+        return
+    delivered = await _send_message_safely(
+        message.bot,
+        item.user_id,
+        "💬 Ответ команды Мск.Митап:\n\n" + parts[2].strip()[:3000],
+    )
+    if delivered:
+        mark_feedback_answered(item.id)
+        await message.answer(f"Ответ на обращение #{item.id} отправлен.")
+    else:
+        await message.answer("Не удалось доставить ответ: пользователь недоступен.")
+
+
 # F.text — любое текстовое сообщение, не подошедшее под фильтры выше:
 # считаем, что человек рассказывает о своих предпочтениях
 @router.message(F.text)
@@ -333,6 +420,26 @@ async def handle_profile_text(
         return
 
     user_id = message.from_user.id
+    if user_id in profile_store.awaiting_feedback:
+        try:
+            item = create_feedback(
+                user_id,
+                message.from_user.first_name,
+                message.from_user.username,
+                message.text,
+                "bot",
+            )
+        except ValueError as error:
+            await message.answer(str(error) + ". Попробуйте ещё раз.")
+            return
+        profile_store.awaiting_feedback.discard(user_id)
+        await notify_admins(message.bot, item)
+        await message.answer(
+            f"Спасибо! Обращение #{item.id} передано команде. "
+            "Ответ придёт сюда, в Telegram."
+        )
+        return
+
     inputs = profile_store.draft_inputs.setdefault(user_id, [])
     inputs.append(message.text)
     answered_field = profile_store.awaiting_clarification.pop(user_id, None)

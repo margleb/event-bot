@@ -19,12 +19,14 @@ from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import parse_qsl
 
+from aiogram import Bot
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from event_bot.analytics import create_feedback, notify_admins, record_usage
 from event_bot.db import (
     INTENT_STATUSES,
     PARTICIPATING_STATUSES,
@@ -145,6 +147,39 @@ class IntentUpdate(BaseModel):
 
 class VisibilityUpdate(BaseModel):
     visible: bool
+
+
+class FeedbackCreate(BaseModel):
+    message: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(cls, value: str) -> str:
+        normalized = " ".join(value.strip().split())
+        if len(normalized) < 3:
+            raise ValueError("сообщение слишком короткое")
+        return normalized
+
+
+MINIAPP_TRACK_EVENTS = {
+    "tab.feed",
+    "tab.my",
+    "tab.group",
+    "tab.profile",
+    "event_details",
+    "external_source",
+}
+
+
+class TrackEvent(BaseModel):
+    event: str
+
+    @field_validator("event")
+    @classmethod
+    def allowed_event(cls, value: str) -> str:
+        if value not in MINIAPP_TRACK_EVENTS:
+            raise ValueError("неизвестное событие")
+        return value
 
 
 def _max_auth_age() -> int:
@@ -387,7 +422,37 @@ def miniapp() -> FileResponse:
 
 @app.get(f"{BASE_PATH}/api/bootstrap")
 def bootstrap(user: Annotated[TelegramUser, Depends(authenticated_user)]) -> dict[str, object]:
+    record_usage(user.id, "miniapp.open", "miniapp")
     return _bootstrap(user)
+
+
+@app.post(f"{BASE_PATH}/api/track")
+def track_miniapp_event(
+    payload: TrackEvent,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, str]:
+    record_usage(user.id, f"miniapp.{payload.event}", "miniapp")
+    return {"status": "ok"}
+
+
+@app.post(f"{BASE_PATH}/api/feedback")
+async def submit_feedback(
+    payload: FeedbackCreate,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    item = create_feedback(
+        user.id,
+        user.first_name,
+        user.username,
+        payload.message,
+        "miniapp",
+    )
+    bot = Bot(token=os.environ["BOT_TOKEN"])
+    try:
+        await notify_admins(bot, item)
+    finally:
+        await bot.session.close()
+    return {"status": "ok", "feedback_id": item.id}
 
 
 @app.put(f"{BASE_PATH}/api/profile")
@@ -427,6 +492,7 @@ async def update_profile(
             await notify_group_assignment(bot, assignment)
         finally:
             await bot.session.close()
+    record_usage(user.id, "miniapp.profile_saved", "miniapp")
     return _bootstrap(user)
 
 
@@ -441,6 +507,7 @@ def update_intent(
     if get_user_profile(user.id) is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Complete your profile first")
     save_intent(user.id, event_id, payload.status)
+    record_usage(user.id, f"miniapp.intent.{payload.status}", "miniapp")
     intent = get_user_intent(user.id, event_id)
     assert intent is not None
     return _event_payload(intent.event, intent)
@@ -457,6 +524,12 @@ def update_visibility(
         raise HTTPException(status.HTTP_409_CONFLICT, "Choose the event first")
     if not set_intent_visibility(user.id, event_id, payload.visible):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    record_usage(
+        user.id,
+        "miniapp.visibility",
+        "miniapp",
+        {"visible": payload.visible},
+    )
     updated = get_user_intent(user.id, event_id)
     assert updated is not None
     return _event_payload(updated.event, updated)
