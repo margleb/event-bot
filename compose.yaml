@@ -2,6 +2,7 @@ services:
   event-bot:
     build:
       context: .
+    image: event-bot:local
     container_name: event-bot
     init: true
     restart: unless-stopped
@@ -9,6 +10,30 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  event-sync:
+    image: event-bot:local
+    container_name: event-bot-sync
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          python -m event_bot.import_events
+          python -m event_bot.embed_events
+          sleep 86400
+        done
     logging:
       driver: json-file
       options:
