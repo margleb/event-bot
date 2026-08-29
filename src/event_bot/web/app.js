@@ -89,6 +89,15 @@
         { label: "Telegram-бот", amount: 141, users: 27 },
       ],
       feedback: { total: 5, new: 1 },
+      inactivity_feedback: {
+        prompts_sent: 18, responses: 12, response_rate: 66.7,
+        reasons: [
+          { code: "no_events", label: "Не нашёл подходящего", amount: 5 },
+          { code: "not_now", label: "Сейчас неактуально", amount: 4 },
+          { code: "confusing", label: "Не понял, как пользоваться", amount: 2 },
+          { code: "other", label: "Другое", amount: 1 },
+        ],
+      },
     };
   }
 
@@ -436,6 +445,16 @@
     ];
     const frequencyMax = Math.max(1, ...frequencyItems.map(([, value]) => value));
     $("#admin-frequency").innerHTML = frequencyItems.map(([label, value]) => analyticsBar(label, value, frequencyMax, "пользователей")).join("");
+
+    const inactivity = data.inactivity_feedback || { prompts_sent: 0, responses: 0, response_rate: 0, reasons: [] };
+    $("#admin-inactivity-rate").textContent = `${formatNumber(inactivity.response_rate, 1)}%`;
+    $("#admin-inactivity-summary").textContent = inactivity.prompts_sent
+      ? `${formatNumber(inactivity.responses)} из ${formatNumber(inactivity.prompts_sent)} ответили за период`
+      : "За этот период опросы ещё не отправлялись";
+    const inactivityMax = Math.max(1, ...inactivity.reasons.map((item) => item.amount));
+    $("#admin-inactivity-feedback").innerHTML = inactivity.reasons.length
+      ? inactivity.reasons.map((item) => analyticsBar(item.label, item.amount, inactivityMax, "ответов")).join("")
+      : `<div class="analytics-empty">Причин пока нет — ответы появятся здесь автоматически.</div>`;
 
     const featureMax = Math.max(1, ...data.top_features.map((item) => item.amount));
     $("#admin-features").innerHTML = data.top_features.length

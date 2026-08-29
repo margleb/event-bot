@@ -19,6 +19,7 @@ from event_bot.analytics import UsageTrackingMiddleware, get_admin_ids
 from event_bot.digest import run_digest_scheduler
 from event_bot.embedding_provider import EmbeddingProvider
 from event_bot.handlers import router
+from event_bot.inactivity_feedback import run_inactivity_feedback_scheduler
 from event_bot.profile_service import ProfileExtractor
 from event_bot.storage import ProfileStore
 
@@ -85,6 +86,7 @@ async def run() -> None:
     background_tasks = [
         asyncio.create_task(run_digest_scheduler(bot)),
         asyncio.create_task(run_admin_report_scheduler(bot)),
+        asyncio.create_task(run_inactivity_feedback_scheduler(bot)),
     ]
 
     try:

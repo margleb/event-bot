@@ -31,6 +31,18 @@ def test_admin_dashboard_measures_frequency_and_real_usage(temp_db, monkeypatch)
     add_usage_event(2, "command.start", "2026-08-29 09:00:00")
     add_usage_event(3, "command.start", "2026-08-20 09:00:00")
     add_usage_event(99, "command.find", "2026-08-29 10:00:00")
+    with db.get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO inactivity_feedback_prompts
+                (user_id, prompt_sent_at, delivery_status, response_code)
+            VALUES (?, ?, 'sent', ?)
+            """,
+            [
+                (1, "2026-08-28 08:00:00", "no_events"),
+                (2, "2026-08-28 09:00:00", None),
+            ],
+        )
 
     report = build_admin_dashboard(
         7,
@@ -57,6 +69,18 @@ def test_admin_dashboard_measures_frequency_and_real_usage(temp_db, monkeypatch)
     assert {source["label"] for source in report["sources"]} == {
         "Telegram-бот",
         "Mini App",
+    }
+    assert report["inactivity_feedback"] == {
+        "prompts_sent": 2,
+        "responses": 1,
+        "response_rate": 50.0,
+        "reasons": [
+            {
+                "code": "no_events",
+                "label": "Не нашёл подходящего",
+                "amount": 1,
+            }
+        ],
     }
 
 

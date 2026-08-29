@@ -29,6 +29,7 @@ EVENT_LABELS = {
     "callback.profile_confirm": "Подтверждение профиля",
     "callback.profile_edit": "Редактирование профиля",
     "callback.digest": "Настройка подборки",
+    "callback.inactive_feedback": "Ответ на вопрос о неактивности",
     "callback.intent.interested": "Отметка «Интересно»",
     "callback.intent.going": "Отметка «Пойду»",
     "callback.intent.not_going": "Отметка «Не подходит»",

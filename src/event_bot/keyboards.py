@@ -71,6 +71,36 @@ def digest_weekday_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def inactivity_feedback_keyboard() -> InlineKeyboardMarkup:
+    """Короткий одноразовый опрос без необходимости печатать текст."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Не нашёл подходящего",
+                    callback_data="inactive_feedback:no_events",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Не понял, как пользоваться",
+                    callback_data="inactive_feedback:confusing",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Сейчас неактуально",
+                    callback_data="inactive_feedback:not_now",
+                ),
+                InlineKeyboardButton(
+                    text="Другое",
+                    callback_data="inactive_feedback:other",
+                ),
+            ],
+        ]
+    )
+
+
 def intent_keyboard(event_id: int) -> InlineKeyboardMarkup:
     """Кнопки отметки под карточкой события.
 

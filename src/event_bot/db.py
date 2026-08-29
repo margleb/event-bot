@@ -234,6 +234,19 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            -- Одноразовый мягкий опрос тех, кто перестал пользоваться ботом.
+            -- Наличие строки защищает от повторной отправки после рестартов.
+            CREATE TABLE IF NOT EXISTS inactivity_feedback_prompts (
+                user_id         INTEGER PRIMARY KEY,
+                prompt_sent_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                delivery_status TEXT NOT NULL DEFAULT 'pending',
+                response_code   TEXT,
+                responded_at    TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             -- Мероприятия. date хранится текстом "ГГГГ-ММ-ДД ЧЧ:ММ:СС",
             -- такой формат корректно сравнивается с datetime('now')
             CREATE TABLE IF NOT EXISTS events (
@@ -395,6 +408,109 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_feedback_status_created "
             "ON feedback_messages(status, created_at)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inactivity_feedback_sent "
+            "ON inactivity_feedback_prompts(prompt_sent_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inactivity_feedback_response "
+            "ON inactivity_feedback_prompts(response_code, responded_at)"
+        )
+
+
+def get_inactive_feedback_user_ids(
+    inactive_before: datetime,
+    *,
+    excluded_user_ids: set[int] | None = None,
+    limit: int = 50,
+) -> list[int]:
+    """Возвращает давно неактивных пользователей, которых ещё не опрашивали."""
+    cutoff = inactive_before
+    if cutoff.tzinfo is not None:
+        cutoff = cutoff.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    cutoff_text = cutoff.strftime(DB_DATETIME_FORMAT)
+    excluded = sorted(excluded_user_ids or set())
+    excluded_sql = (
+        f" AND activity.user_id NOT IN ({','.join('?' for _ in excluded)})"
+        if excluded
+        else ""
+    )
+    amount = max(1, min(limit, 200))
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            WITH known_activity AS (
+                SELECT telegram_id AS user_id, created_at FROM users
+                UNION ALL
+                SELECT user_id, created_at FROM usage_events
+            ), activity AS (
+                SELECT user_id, MAX(created_at) AS last_activity
+                FROM known_activity
+                GROUP BY user_id
+            )
+            SELECT activity.user_id
+            FROM activity
+            LEFT JOIN inactivity_feedback_prompts AS prompt
+              ON prompt.user_id = activity.user_id
+            WHERE activity.last_activity <= ?
+              AND prompt.user_id IS NULL
+            """
+            + excluded_sql
+            + """
+            ORDER BY activity.last_activity, activity.user_id
+            LIMIT ?
+            """,
+            (cutoff_text, *excluded, amount),
+        ).fetchall()
+    return [int(row["user_id"]) for row in rows]
+
+
+def claim_inactivity_feedback_prompt(user_id: int) -> bool:
+    """Резервирует одноразовую отправку до обращения к Telegram API."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO inactivity_feedback_prompts
+                (user_id, delivery_status)
+            VALUES (?, 'pending')
+            """,
+            (user_id,),
+        )
+    return cursor.rowcount > 0
+
+
+def mark_inactivity_feedback_delivery(user_id: int, status: str) -> None:
+    """Фиксирует результат доставки, сохраняя защиту от повторной отправки."""
+    if status not in {"sent", "failed"}:
+        raise ValueError("Недопустимый статус доставки")
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE inactivity_feedback_prompts
+            SET delivery_status = ?
+            WHERE user_id = ? AND delivery_status = 'pending'
+            """,
+            (status, user_id),
+        )
+
+
+def save_inactivity_feedback_response(user_id: int, response_code: str) -> bool:
+    """Сохраняет первый ответ на одноразовый опрос."""
+    allowed = {"no_events", "confusing", "not_now", "other"}
+    if response_code not in allowed:
+        return False
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE inactivity_feedback_prompts
+            SET response_code = ?, responded_at = datetime('now')
+            WHERE user_id = ?
+              AND delivery_status = 'sent'
+              AND response_code IS NULL
+            """,
+            (response_code, user_id),
+        )
+    return cursor.rowcount > 0
 
 
 def save_user_profile(

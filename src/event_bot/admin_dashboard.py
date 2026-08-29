@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from event_bot.analytics import EVENT_LABELS, get_admin_ids
 from event_bot.db import DB_DATETIME_FORMAT, get_connection
+from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -240,6 +241,35 @@ def build_admin_dashboard(
             FROM feedback_messages
             """
         ).fetchone()
+        inactivity_feedback = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN delivery_status = 'sent' THEN 1 ELSE 0 END)
+                    AS prompts_sent,
+                SUM(CASE WHEN delivery_status = 'sent'
+                              AND response_code IS NOT NULL THEN 1 ELSE 0 END)
+                    AS responses
+            FROM inactivity_feedback_prompts
+            WHERE prompt_sent_at >= ? AND prompt_sent_at < ?
+            """
+            + admin_filter,
+            (start_text, end_text, *admin_ids),
+        ).fetchone()
+        inactivity_reason_rows = conn.execute(
+            """
+            SELECT response_code, COUNT(*) AS amount
+            FROM inactivity_feedback_prompts
+            WHERE prompt_sent_at >= ? AND prompt_sent_at < ?
+              AND delivery_status = 'sent'
+              AND response_code IS NOT NULL
+            """
+            + admin_filter
+            + """
+            GROUP BY response_code
+            ORDER BY amount DESC, response_code
+            """,
+            (start_text, end_text, *admin_ids),
+        ).fetchall()
 
     daily_by_date = {row["day"]: row for row in daily_rows}
     daily = []
@@ -270,6 +300,9 @@ def build_admin_dashboard(
 
     def percentage(value: int, total: int) -> float:
         return round(value * 100 / total, 1) if total else 0.0
+
+    prompts_sent = int(inactivity_feedback["prompts_sent"] or 0)
+    inactivity_responses = int(inactivity_feedback["responses"] or 0)
 
     return {
         "days": days,
@@ -326,5 +359,20 @@ def build_admin_dashboard(
         "feedback": {
             "total": int(feedback["total"] or 0),
             "new": int(feedback["fresh"] or 0),
+        },
+        "inactivity_feedback": {
+            "prompts_sent": prompts_sent,
+            "responses": inactivity_responses,
+            "response_rate": percentage(inactivity_responses, prompts_sent),
+            "reasons": [
+                {
+                    "code": row["response_code"],
+                    "label": INACTIVITY_FEEDBACK_LABELS.get(
+                        row["response_code"], row["response_code"]
+                    ),
+                    "amount": int(row["amount"]),
+                }
+                for row in inactivity_reason_rows
+            ],
         },
     }

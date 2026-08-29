@@ -46,6 +46,7 @@ from event_bot.db import (
     is_open_participant,
     mark_visibility_asked,
     reject_connection_request,
+    save_inactivity_feedback_response,
     save_intent,
     save_user_profile,
     set_digest_schedule,
@@ -59,6 +60,7 @@ from event_bot.embedding_provider import (
     vector_to_blob,
 )
 from event_bot.group_notifications import notify_group_assignment
+from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
 from event_bot.keyboards import (
     companion_keyboard,
     digest_weekday_keyboard,
@@ -413,12 +415,6 @@ async def handle_profile_text(
     if message.text is None or message.from_user is None:
         return
 
-    if profile_extractor is None:
-        await message.answer(
-            "Сервис разбора профиля сейчас недоступен. Попробуй позже."
-        )
-        return
-
     user_id = message.from_user.id
     if user_id in profile_store.awaiting_feedback:
         try:
@@ -437,6 +433,12 @@ async def handle_profile_text(
         await message.answer(
             f"Спасибо! Обращение #{item.id} передано команде. "
             "Ответ придёт сюда, в Telegram."
+        )
+        return
+
+    if profile_extractor is None:
+        await message.answer(
+            "Сервис разбора профиля сейчас недоступен. Попробуй позже."
         )
         return
 
@@ -598,6 +600,36 @@ async def set_weekly_digest(callback: CallbackQuery) -> None:
             )
         await callback.message.answer(text)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("inactive_feedback:"))
+async def handle_inactivity_feedback(
+    callback: CallbackQuery,
+    profile_store: ProfileStore,
+) -> None:
+    """Принимает один короткий ответ; текст просим только для «Другое»."""
+    parts = (callback.data or "").split(":", maxsplit=1)
+    code = parts[1] if len(parts) == 2 else ""
+    if code not in INACTIVITY_FEEDBACK_LABELS:
+        await callback.answer()
+        return
+
+    saved = save_inactivity_feedback_response(callback.from_user.id, code)
+    if not saved:
+        await callback.answer("Ответ уже сохранён")
+        return
+
+    await callback.answer("Спасибо!")
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Спасибо, ответ сохранён. Больше напоминать об этом не будем."
+        )
+        if code == "other":
+            profile_store.awaiting_feedback.add(callback.from_user.id)
+            await callback.message.answer(
+                "Если удобно, напишите одним сообщением, что можно улучшить. "
+                "Я передам его команде."
+            )
 
 
 def _parse_event_callback(data: str | None) -> tuple[str, int] | None:
