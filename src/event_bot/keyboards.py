@@ -1,7 +1,7 @@
 # Inline-клавиатуры — кнопки под сообщением. У каждой кнопки есть
 # callback_data: эту строку Telegram присылает обратно при нажатии,
 # по ней в handlers.py находится нужный обработчик.
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 
 DIGEST_WEEKDAY_BUTTONS = (
@@ -13,6 +13,20 @@ DIGEST_WEEKDAY_BUTTONS = (
     ("Сб", 5),
     ("Вс", 6),
 )
+
+
+def miniapp_keyboard(url: str) -> InlineKeyboardMarkup:
+    """Кнопка запуска визуального приложения внутри Telegram."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✨ Открыть подборку",
+                    web_app=WebAppInfo(url=url),
+                )
+            ]
+        ]
+    )
 
 
 def profile_keyboard() -> InlineKeyboardMarkup:

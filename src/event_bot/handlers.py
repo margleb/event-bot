@@ -1,5 +1,6 @@
 # src/event_bot/handlers.py
 import logging
+import os
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
@@ -47,6 +48,7 @@ from event_bot.keyboards import (
     digest_weekday_keyboard,
     intent_card_keyboard,
     intent_keyboard,
+    miniapp_keyboard,
     profile_keyboard,
     request_response_keyboard,
     show_me_keyboard,
@@ -123,13 +125,15 @@ def _load_profile(user_id: int, profile_store: ProfileStore) -> Profile | None:
 # CommandStart() — фильтр, срабатывает только на /start
 @router.message(CommandStart())
 async def start(message: Message) -> None:
+    miniapp_url = os.getenv("MINIAPP_URL", "").strip()
     await message.answer(
         "Расскажи свободно, куда ты любишь ходить, "
         "что тебе интересно, когда обычно удобно, "
         "какой бюджет и какая компания комфортна.\n\n"
         "Потом /find — подберу мероприятия, /profile — покажу профиль,\n"
         "/schedule — настроит еженедельную подборку,\n"
-        "/my — что ты уже отметил."
+        "/my — что ты уже отметил.",
+        reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
     )
 
 

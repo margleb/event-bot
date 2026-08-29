@@ -4,6 +4,7 @@ import os
 from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -30,6 +31,23 @@ async def run() -> None:
         raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
 
     bot = Bot(token=bot_token)
+    miniapp_url = os.getenv("MINIAPP_URL", "").strip()
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="find", description="Подобрать мероприятия"),
+            BotCommand(command="profile", description="Мои предпочтения"),
+            BotCommand(command="schedule", description="Настроить подборку"),
+            BotCommand(command="my", description="Мои мероприятия"),
+        ]
+    )
+    if miniapp_url.startswith("https://"):
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Афиша",
+                web_app=WebAppInfo(url=miniapp_url),
+            )
+        )
     openai_api_key = os.getenv("OPENAI_API_KEY")
     openai_client = (
         AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None

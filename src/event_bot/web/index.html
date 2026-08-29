@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#f5f2eb">
+    <title>Афиша для тебя</title>
+    <link rel="stylesheet" href="/r/app/assets/styles.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="/r/app/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div id="loading" class="state-screen">
+      <div class="loader-mark">М</div>
+      <div class="loader-line"><span></span></div>
+      <p>Собираем вашу афишу…</p>
+    </div>
+
+    <section id="launch-screen" class="state-screen hidden">
+      <div class="launch-art" aria-hidden="true">
+        <span>♪</span><span>◌</span><span>✦</span>
+      </div>
+      <p class="eyebrow">МОСКВА · СОБЫТИЯ</p>
+      <h1>Ваша неделя<br>может быть ярче</h1>
+      <p class="launch-copy">Откройте приложение из Telegram-бота, чтобы увидеть персональную подборку.</p>
+      <a class="primary-button link-button" href="https://t.me/MskMeetupBot">Открыть @MskMeetupBot</a>
+    </section>
+
+    <div id="app" class="app-shell hidden">
+      <header class="topbar">
+        <div>
+          <p id="header-kicker" class="eyebrow">ВАША АФИША</p>
+          <h1 id="header-title">Куда пойдём?</h1>
+        </div>
+        <div id="avatar" class="avatar" aria-label="Профиль">М</div>
+      </header>
+
+      <main>
+        <section id="feed-panel" class="panel active" data-panel="feed">
+          <div class="intro-card">
+            <div>
+              <p>ПОДОБРАНО ПО ВКУСУ</p>
+              <h2>Не просто афиша.<br>Это ваше.</h2>
+            </div>
+            <span class="intro-orbit">✦</span>
+          </div>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">БЛИЖАЙШИЕ ДАТЫ</p>
+              <h2>Рекомендуем</h2>
+            </div>
+            <span id="event-count" class="count-badge">0</span>
+          </div>
+          <div id="event-list" class="event-list"></div>
+        </section>
+
+        <section id="my-panel" class="panel" data-panel="my">
+          <div class="section-heading standalone">
+            <div>
+              <p class="eyebrow">ВАШИ ПЛАНЫ</p>
+              <h2>Мои мероприятия</h2>
+            </div>
+          </div>
+          <div id="my-filters" class="filter-row" role="group" aria-label="Фильтр мероприятий">
+            <button class="filter-chip active" data-filter="all">Все</button>
+            <button class="filter-chip" data-filter="going">Иду</button>
+            <button class="filter-chip" data-filter="interested">Интересно</button>
+          </div>
+          <div id="my-event-list" class="event-list"></div>
+        </section>
+
+        <section id="profile-panel" class="panel" data-panel="profile">
+          <div id="onboarding-copy" class="onboarding-copy hidden">
+            <span class="step-pill">1 минута</span>
+            <h2>Расскажите,<br>что вам нравится</h2>
+            <p>Чем точнее профиль, тем меньше случайных событий в подборке.</p>
+          </div>
+
+          <form id="profile-form" novalidate>
+            <div class="form-section">
+              <div class="form-title">
+                <span>01</span>
+                <div><h3>Интересы</h3><p>Выберите несколько или добавьте свои</p></div>
+              </div>
+              <div id="interest-chips" class="choice-grid"></div>
+              <div class="add-row">
+                <input id="custom-interest" maxlength="60" placeholder="Например, стендап">
+                <button id="add-interest" type="button" aria-label="Добавить интерес">+</button>
+              </div>
+            </div>
+
+            <div class="form-section">
+              <div class="form-title">
+                <span>02</span>
+                <div><h3>Удобные дни</h3><p>Можно выбрать несколько</p></div>
+              </div>
+              <div id="day-chips" class="week-grid"></div>
+            </div>
+
+            <div class="form-section">
+              <div class="form-title">
+                <span>03</span>
+                <div><h3>Бюджет</h3><p>Максимальная цена одного билета</p></div>
+              </div>
+              <div id="budget-chips" class="segment-grid budget-grid"></div>
+              <label class="number-field">
+                <span>Другая сумма</span>
+                <div><input id="budget-input" type="number" min="0" max="1000000" inputmode="numeric" placeholder="2500"><b>₽</b></div>
+              </label>
+            </div>
+
+            <div class="form-section">
+              <div class="form-title">
+                <span>04</span>
+                <div><h3>Компания</h3><p>Как комфортнее проводить время</p></div>
+              </div>
+              <div id="group-chips" class="segment-grid"></div>
+            </div>
+
+            <div class="form-section">
+              <div class="form-title">
+                <span>05</span>
+                <div><h3>Не предлагать</h3><p>Необязательно</p></div>
+              </div>
+              <input id="avoid-input" class="wide-input" maxlength="300" placeholder="Например: спорт, шумные вечеринки">
+            </div>
+
+            <div class="form-section digest-section">
+              <div class="digest-icon">↗</div>
+              <div class="digest-copy"><h3>Еженедельная подборка</h3><p>Пришлём лучшие варианты после 10:00</p></div>
+              <select id="digest-select" aria-label="День еженедельной подборки">
+                <option value="">Выключена</option>
+                <option value="0">По понедельникам</option>
+                <option value="1">По вторникам</option>
+                <option value="2">По средам</option>
+                <option value="3">По четвергам</option>
+                <option value="4">По пятницам</option>
+                <option value="5">По субботам</option>
+                <option value="6">По воскресеньям</option>
+              </select>
+            </div>
+
+            <p id="form-error" class="form-error hidden"></p>
+            <button id="save-profile" class="primary-button" type="submit">
+              <span>Сохранить и подобрать</span><b>→</b>
+            </button>
+          </form>
+        </section>
+      </main>
+
+      <nav id="bottom-nav" class="bottom-nav" aria-label="Основная навигация">
+        <button class="nav-button active" data-tab="feed"><span>✦</span><b>Афиша</b></button>
+        <button class="nav-button" data-tab="my"><span>◒</span><b>Мои</b></button>
+        <button class="nav-button" data-tab="profile"><span>◇</span><b>Профиль</b></button>
+      </nav>
+    </div>
+
+    <div id="event-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button id="modal-backdrop" class="modal-backdrop" aria-label="Закрыть"></button>
+      <article class="modal-sheet">
+        <div class="modal-handle"></div>
+        <button id="modal-close" class="modal-close" aria-label="Закрыть">×</button>
+        <div id="modal-visual" class="modal-visual"><span></span></div>
+        <div class="modal-body">
+          <p id="modal-date" class="eyebrow"></p>
+          <h2 id="modal-title"></h2>
+          <div id="modal-meta" class="modal-meta"></div>
+          <p id="modal-description" class="modal-description"></p>
+          <div id="modal-tags" class="tag-row"></div>
+          <a id="modal-source" class="source-link" target="_blank" rel="noopener noreferrer">Подробнее на сайте ↗</a>
+          <div id="modal-actions" class="card-actions modal-actions"></div>
+        </div>
+      </article>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+  </body>
+</html>

@@ -40,3 +40,25 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+  event-web:
+    image: event-bot:local
+    pull_policy: never
+    container_name: event-bot-web
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command:
+      - python
+      - -m
+      - event_bot.webapp
+    ports:
+      - "127.0.0.1:8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

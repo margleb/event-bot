@@ -26,6 +26,10 @@ Telegram-бот, который собирает предпочтения пол
 - глобальная симметричная блокировка и лимит пяти запросов за 24 часа;
 - еженедельная персональная подборка в выбранный пользователем день;
 - защита автоматической рассылки от повторов после перезапуска бота.
+- Telegram Mini App с мобильной лентой, карточками, отметками и редактором
+  профиля;
+- серверная проверка подписи Telegram `initData` и срока её действия;
+- кнопка запуска Mini App в `/start` и постоянном меню бота.
 
 ## Команды
 
@@ -68,6 +72,10 @@ OPENAI_API_KEY=openai-api-key
 EMBEDDING_MODEL=text-embedding-3-small
 # необязательно, час еженедельной отправки по Москве (по умолчанию 10)
 DIGEST_HOUR_MSK=10
+# публичный HTTPS-адрес Mini App
+MINIAPP_URL=https://bot-ams.margleb.ru/r/app
+# максимальный возраст Telegram initData, по умолчанию сутки
+MINIAPP_AUTH_MAX_AGE_SECONDS=86400
 ```
 
 Запустите бота одним из способов:
@@ -81,6 +89,19 @@ uv run event-bot
 ```bash
 uv run python main.py
 ```
+
+API и статический интерфейс Mini App запускаются отдельно:
+
+```bash
+uv run python -m event_bot.webapp
+```
+
+По умолчанию процесс слушает порт `8080`, а публичные маршруты начинаются с
+`/r`: интерфейс находится на `/r/app`, health-check — на `/r/health`. В
+production порт публикуется только на `127.0.0.1` через `compose.yaml`, снаружи
+к нему должен вести HTTPS reverse proxy. API не доверяет идентификатору из
+запроса: каждый вызов заново проверяет HMAC строки `initData`, созданной
+Telegram.
 
 При старте бот создаёт файл базы `data/bot.db` и применяет схему. События
 импортируются отдельно:
@@ -136,6 +157,8 @@ uv run python -m event_bot.delete_seed_events
     ├── digest.py                   # фоновая еженедельная рассылка
     ├── handlers.py                 # Telegram-команды и callback-обработчики
     ├── keyboards.py                # inline-клавиатуры
+    ├── webapp.py                    # API, авторизация Telegram и раздача Mini App
+    ├── web/                         # мобильный HTML/CSS/JS-интерфейс
     ├── models.py                   # Pydantic-модели
     ├── import_events.py            # CLI атомарного импорта событий
     ├── embed_events.py             # batch-индексация событий

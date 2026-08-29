@@ -638,6 +638,7 @@ def find_events(
     profile_embedding_model: str | None = None,
     avoid_embedding: bytes | None = None,
     avoid_embedding_model: str | None = None,
+    limit: int = MAX_EVENTS,
 ) -> list[Event]:
     """Жёстко фильтрует в SQL, затем ранжирует векторами или тегами."""
     # Запрос собираем по частям: условие по бюджету добавляется,
@@ -685,12 +686,28 @@ def find_events(
         avoid_embedding_model,
     )
     if semantic is not None:
-        return semantic[:MAX_EVENTS]
+        return semantic[:limit]
 
     # Нет вектора профиля, модель не совпала или каталог ещё не проиндексирован:
     # используем прежний алгоритм и не оставляем пользователя без результата.
     fallback = _rank_by_tags([event for event, _ in candidates], profile)
-    return fallback[:MAX_EVENTS]
+    return fallback[:limit]
+
+
+def get_event(event_id: int) -> Event | None:
+    """Одно мероприятие по id для действий из Mini App."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return _row_to_event(row)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        logger.exception("Повреждено событие id=%s", event_id)
+        return None
 
 
 def _format_source_link(event: Event) -> str:
@@ -915,7 +932,9 @@ def set_intent_visibility(user_id: int, event_id: int, visible: bool) -> bool:
 # Общая часть запросов об отметках: JOIN подтягивает к отметке данные
 # события, поэтому одним запросом получаем и статус, и название с датой
 _INTENTS_QUERY = """
-    SELECT e.*, i.status, i.visible, i.visibility_asked
+    SELECT e.*, i.status AS intent_status,
+           i.visible AS intent_visible,
+           i.visibility_asked AS intent_visibility_asked
     FROM intents i
     JOIN events e ON e.id = i.event_id
     WHERE i.user_id = ?
@@ -927,10 +946,10 @@ def _row_to_intent(row: sqlite3.Row) -> UserIntent:
     return UserIntent(
         # в row лежат и колонки события, и статус с видимостью
         event=_row_to_event(row),
-        status=row["status"],
+        status=row["intent_status"],
         # 1/0 из SQLite обратно в True/False
-        visible=bool(row["visible"]),
-        visibility_asked=bool(row["visibility_asked"]),
+        visible=bool(row["intent_visible"]),
+        visibility_asked=bool(row["intent_visibility_asked"]),
     )
 
 
