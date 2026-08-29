@@ -15,6 +15,17 @@ dependencies = [
     "python-dotenv>=1.2.3",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.1.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [project.scripts]
 event-bot = "event_bot:main"
 

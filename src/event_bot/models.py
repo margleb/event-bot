@@ -124,6 +124,51 @@ class ConnectionRequest(BaseModel):
     common_interests: list[str] = Field(default_factory=list)
 
 
+class InterestGroup(BaseModel):
+    """Постоянный клуб, подобранный по интересам."""
+
+    id: int
+    status: str
+    topics: list[str] = Field(default_factory=list)
+    member_count: int
+
+    @property
+    def title(self) -> str:
+        topics = ", ".join(self.topics) or "новые знакомства"
+        return f"Клуб: {topics}"
+
+
+class InterestGroupView(BaseModel):
+    """Состояние клуба относительно открывшего его пользователя."""
+
+    group: InterestGroup
+    members: list[Companion] = Field(default_factory=list)
+
+
+class GroupAssignment(BaseModel):
+    """Результат атомарного вступления или перераспределения."""
+
+    group: InterestGroup
+    newly_activated: bool = False
+    joined: bool = False
+    notify_user_ids: list[int] = Field(default_factory=list)
+
+
+class GroupConnectionRequest(BaseModel):
+    """Запрос на знакомство между участниками постоянного клуба."""
+
+    id: int
+    group_id: int
+    group_title: str
+    from_user: int
+    to_user: int
+    from_name: str
+    to_name: str
+    from_username: Optional[str] = None
+    to_username: Optional[str] = None
+    common_interests: list[str] = Field(default_factory=list)
+
+
 # Отметка + само событие: то, что возвращает db.get_user_intents
 class UserIntent(BaseModel):
     """Отметка пользователя по конкретному мероприятию"""

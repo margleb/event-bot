@@ -13,5 +13,8 @@ wheels/
 # Local database
 data/
 
+# Local Claude settings
+.claude/
+
 # Generated local reports
 /tmp/

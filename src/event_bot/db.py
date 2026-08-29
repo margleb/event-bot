@@ -886,6 +886,23 @@ def find_companions(
     statuses = ", ".join("?" * len(PARTICIPATING_STATUSES))
 
     with get_connection() as conn:
+        # Проверяем взаимность и на уровне доменной функции, а не только в
+        # Telegram-хендлере. Так прямой вызов из другого интерфейса не сможет
+        # показать список тому, кто сам не открылся на этом событии.
+        viewer = conn.execute(
+            f"""
+            SELECT 1
+            FROM intents
+            WHERE event_id = ?
+              AND user_id = ?
+              AND status IN ({statuses})
+              AND visible = 1
+            """,
+            (event_id, user_id, *PARTICIPATING_STATUSES),
+        ).fetchone()
+        if viewer is None:
+            return []
+
         rows = conn.execute(
             f"""
             -- Внутренний JOIN: строка в users появляется только при
