@@ -38,6 +38,20 @@ def test_usage_report_counts_users_visits_and_features(temp_db):
     assert "Вкладка «Афиша»" in text
 
 
+def test_admin_activity_is_excluded_from_user_metrics(temp_db, monkeypatch):
+    monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "1")
+    record_usage(1, "command.admin", "bot")
+    record_usage(1, "miniapp.open", "miniapp")
+    record_usage(2, "command.start", "bot")
+
+    report = build_admin_report()
+
+    assert report["known_users"] == 1
+    assert report["active"]["day"] == 1
+    assert report["visits"]["day"] == 1
+    assert report["actions_week"] == 1
+
+
 def test_feedback_lifecycle_and_normalization(temp_db):
     item = create_feedback(
         42,

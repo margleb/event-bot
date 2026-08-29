@@ -220,16 +220,37 @@ def mark_feedback_answered(feedback_id: int) -> bool:
 
 
 def build_admin_report() -> dict[str, object]:
+    admin_ids = sorted(get_admin_ids())
+    admin_filter = (
+        f" AND user_id NOT IN ({','.join('?' for _ in admin_ids)})"
+        if admin_ids
+        else ""
+    )
     with get_connection() as conn:
-        known_users = conn.execute(
-            """
-            SELECT COUNT(*) AS amount FROM (
-                SELECT telegram_id AS user_id FROM users
-                UNION
-                SELECT user_id FROM usage_events
-            )
-            """
-        ).fetchone()["amount"]
+        if admin_ids:
+            placeholders = ",".join("?" for _ in admin_ids)
+            known_users = conn.execute(
+                f"""
+                SELECT COUNT(*) AS amount FROM (
+                    SELECT telegram_id AS user_id FROM users
+                    WHERE telegram_id NOT IN ({placeholders})
+                    UNION
+                    SELECT user_id FROM usage_events
+                    WHERE user_id NOT IN ({placeholders})
+                )
+                """,
+                (*admin_ids, *admin_ids),
+            ).fetchone()["amount"]
+        else:
+            known_users = conn.execute(
+                """
+                SELECT COUNT(*) AS amount FROM (
+                    SELECT telegram_id AS user_id FROM users
+                    UNION
+                    SELECT user_id FROM usage_events
+                )
+                """
+            ).fetchone()["amount"]
         active = {}
         for label, modifier in (("day", "-1 day"), ("week", "-7 days"), ("month", "-30 days")):
             active[label] = conn.execute(
@@ -237,8 +258,9 @@ def build_admin_report() -> dict[str, object]:
                 SELECT COUNT(DISTINCT user_id) AS amount
                 FROM usage_events
                 WHERE created_at >= datetime('now', ?)
-                """,
-                (modifier,),
+                """
+                + admin_filter,
+                (modifier, *admin_ids),
             ).fetchone()["amount"]
         visits = {}
         for label, modifier in (("day", "-1 day"), ("week", "-7 days")):
@@ -248,14 +270,17 @@ def build_admin_report() -> dict[str, object]:
                 FROM usage_events
                 WHERE created_at >= datetime('now', ?)
                   AND event_name IN ('miniapp.open', 'command.start')
-                """,
-                (modifier,),
+                """
+                + admin_filter,
+                (modifier, *admin_ids),
             ).fetchone()["amount"]
         actions_week = conn.execute(
             """
             SELECT COUNT(*) AS amount FROM usage_events
             WHERE created_at >= datetime('now', '-7 days')
             """
+            + admin_filter,
+            admin_ids,
         ).fetchone()["amount"]
         top_features = conn.execute(
             """
@@ -263,18 +288,26 @@ def build_admin_report() -> dict[str, object]:
             FROM usage_events
             WHERE created_at >= datetime('now', '-7 days')
               AND event_name NOT IN ('command.admin', 'command.feedbacks', 'command.reply')
+            """
+            + admin_filter
+            + """
             GROUP BY event_name
             ORDER BY amount DESC, event_name
             LIMIT 8
-            """
+            """,
+            admin_ids,
         ).fetchall()
         daily_rows = conn.execute(
             """
             SELECT date(created_at) AS day, COUNT(DISTINCT user_id) AS amount
             FROM usage_events
             WHERE created_at >= datetime('now', '-6 days')
-            GROUP BY date(created_at)
             """
+            + admin_filter
+            + """
+            GROUP BY date(created_at)
+            """,
+            admin_ids,
         ).fetchall()
         feedback = conn.execute(
             """
