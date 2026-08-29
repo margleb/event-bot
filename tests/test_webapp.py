@@ -207,6 +207,42 @@ def test_miniapp_rejects_unknown_tracking_event(temp_db, monkeypatch):
     assert response.status_code == 422
 
 
+def test_admin_dashboard_is_visible_only_to_configured_admin(temp_db, monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "42")
+
+    with TestClient(app) as client:
+        admin_bootstrap = client.get("/r/api/bootstrap", headers=auth_headers(42))
+        user_bootstrap = client.get("/r/api/bootstrap", headers=auth_headers(43))
+        dashboard = client.get(
+            "/r/api/admin/analytics?days=7",
+            headers=auth_headers(42),
+        )
+        forbidden = client.get(
+            "/r/api/admin/analytics?days=7",
+            headers=auth_headers(43),
+        )
+        invalid_period = client.get(
+            "/r/api/admin/analytics?days=8",
+            headers=auth_headers(42),
+        )
+        tracked = client.post(
+            "/r/api/track",
+            headers=auth_headers(42),
+            json={"event": "tab.admin"},
+        )
+
+    assert admin_bootstrap.status_code == 200
+    assert admin_bootstrap.json()["is_admin"] is True
+    assert user_bootstrap.status_code == 200
+    assert user_bootstrap.json()["is_admin"] is False
+    assert dashboard.status_code == 200
+    assert dashboard.json()["days"] == 7
+    assert forbidden.status_code == 403
+    assert invalid_period.status_code == 422
+    assert tracked.status_code == 200
+
+
 def test_event_intent_and_visibility(
     temp_db,
     monkeypatch,

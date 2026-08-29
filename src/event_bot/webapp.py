@@ -26,7 +26,8 @@ from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from event_bot.analytics import create_feedback, notify_admins, record_usage
+from event_bot.admin_dashboard import build_admin_dashboard
+from event_bot.analytics import create_feedback, is_admin, notify_admins, record_usage
 from event_bot.db import (
     INTENT_STATUSES,
     PARTICIPATING_STATUSES,
@@ -166,6 +167,7 @@ MINIAPP_TRACK_EVENTS = {
     "tab.my",
     "tab.group",
     "tab.profile",
+    "tab.admin",
     "event_details",
     "external_source",
 }
@@ -260,6 +262,14 @@ async def authenticated_user(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(error)) from error
 
 
+async def authenticated_admin(
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> TelegramUser:
+    if not is_admin(user.id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
+    return user
+
+
 def _profile_payload(profile: Profile | None) -> dict[str, object] | None:
     if profile is None:
         return None
@@ -340,6 +350,7 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
             "username": user.username,
             "photo_url": user.photo_url,
         },
+        "is_admin": is_admin(user.id),
         "profile": _profile_payload(profile),
         "digest_weekday": get_digest_schedule(user.id) if profile else None,
         "group_matching_enabled": get_group_matching_enabled(user.id),
@@ -433,6 +444,19 @@ def track_miniapp_event(
 ) -> dict[str, str]:
     record_usage(user.id, f"miniapp.{payload.event}", "miniapp")
     return {"status": "ok"}
+
+
+@app.get(f"{BASE_PATH}/api/admin/analytics")
+def admin_analytics(
+    user: Annotated[TelegramUser, Depends(authenticated_admin)],
+    days: int = 30,
+) -> dict[str, object]:
+    if days not in {7, 30, 90}:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Period must be 7, 30 or 90 days",
+        )
+    return build_admin_dashboard(days)
 
 
 @app.post(f"{BASE_PATH}/api/feedback")

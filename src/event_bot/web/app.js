@@ -23,6 +23,7 @@
   const GLYPHS = ["♪", "◌", "✦", "◇", "∿"];
   const LOCAL_PREVIEW = {
     user: { id: 1, first_name: "Дима", username: "preview", photo_url: null },
+    is_admin: true,
     profile: {
       interests: ["Концерты", "Выставки", "Стендап"], avoid: ["спорт"],
       days: ["fri", "sat", "sun"], budget_rub: 3000,
@@ -49,6 +50,48 @@
   };
   LOCAL_PREVIEW.my_events = LOCAL_PREVIEW.events.filter((event) => event.intent);
 
+  function localAdminPreview(days) {
+    const today = new Date();
+    const daily = Array.from({ length: days }, (_, index) => {
+      const date = new Date(today);
+      date.setDate(today.getDate() - (days - index - 1));
+      const wave = Math.max(0, Math.round(4 + Math.sin(index / 2.2) * 2 + index / Math.max(days / 4, 1)));
+      return {
+        date: date.toISOString().slice(0, 10),
+        active_users: wave,
+        visits: wave + (index % 3),
+        actions: wave * 5 + (index % 4) * 2,
+      };
+    });
+    const active = Math.max(...daily.map((item) => item.active_users));
+    return {
+      days,
+      period: { from: daily[0].date, to: daily[daily.length - 1].date, generated_at: new Date().toISOString() },
+      summary: {
+        known_users: 74, active_users: active + 24, previous_active_users: active + 17,
+        new_users: 12, engaged_users: active + 17, returning_users: active + 10,
+        dormant_users: 34, visits: 96, previous_visits: 79, actions: 428,
+        previous_actions: 351, usage_rate: 54.1, engagement_rate: 82.5,
+        returning_rate: 67.5, actions_per_active: 10.7, visits_per_active: 2.4,
+        active_days_per_user: 3.2,
+      },
+      daily,
+      frequency: { one_day: 13, two_three_days: 15, four_seven_days: 8, eight_plus_days: 4 },
+      top_features: [
+        { label: "Вкладка «Афиша»", amount: 91, users: 29 },
+        { label: "Карточка события", amount: 68, users: 24 },
+        { label: "Заполнение профиля", amount: 54, users: 18 },
+        { label: "Подбор событий", amount: 41, users: 17 },
+        { label: "Отметка «Интересно»", amount: 32, users: 14 },
+      ],
+      sources: [
+        { label: "Mini App", amount: 287, users: 34 },
+        { label: "Telegram-бот", amount: 141, users: 27 },
+      ],
+      feedback: { total: 5, new: 1 },
+    };
+  }
+
   const state = {
     data: null,
     tab: "feed",
@@ -58,6 +101,10 @@
     budget: null,
     group: [null, null],
     modalEventId: null,
+    adminData: null,
+    adminDays: 30,
+    adminMetric: "active_users",
+    adminLoading: false,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -156,8 +203,10 @@
 
   function renderHeader() {
     const user = state.data.user;
-    const titles = { profile: "Ваш профиль", my: "Ваши планы", group: "Ваша компания" };
+    const titles = { profile: "Ваш профиль", my: "Ваши планы", group: "Ваша компания", admin: "Работа бота" };
+    const kickers = { admin: "АНАЛИТИКА · АКТУАЛЬНЫЕ ДАННЫЕ" };
     $("#header-title").textContent = titles[state.tab] || `Привет, ${user.first_name}!`;
+    $("#header-kicker").textContent = kickers[state.tab] || "ВАША АФИША";
     const avatar = $("#avatar");
     avatar.textContent = (user.first_name || "М").slice(0, 1).toUpperCase();
     if (user.photo_url) avatar.innerHTML = `<img src="${escapeHtml(user.photo_url)}" alt="">`;
@@ -261,8 +310,169 @@
       <div class="member-list">${members}</div>`;
   }
 
+  function formatNumber(value, digits = 0) {
+    return Number(value || 0).toLocaleString("ru-RU", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+  }
+
+  function shortDate(value) {
+    const [, month, day] = String(value).split("-");
+    return `${day}.${month}`;
+  }
+
+  function comparisonCopy(current, previous) {
+    const difference = Number(current || 0) - Number(previous || 0);
+    if (!previous) return current ? "новая активность" : "без изменений";
+    const percent = Math.round(Math.abs(difference) * 100 / previous);
+    if (!difference) return "как в прошлом периоде";
+    return `${difference > 0 ? "↑" : "↓"} ${percent}% к прошлому периоду`;
+  }
+
+  function configureAdminAccess() {
+    const allowed = Boolean(state.data?.is_admin);
+    $("#admin-nav-button").classList.toggle("hidden", !allowed);
+    $("#bottom-nav").classList.toggle("admin-enabled", allowed);
+    if (!allowed && state.tab === "admin") setTab("feed");
+  }
+
+  function metricCard(label, value, note, accent = "") {
+    return `
+      <article class="admin-kpi ${accent}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+        <small>${escapeHtml(note)}</small>
+      </article>`;
+  }
+
+  function renderAdminChart() {
+    const data = state.adminData;
+    if (!data) return;
+    const metric = state.adminMetric;
+    const titles = {
+      active_users: "Активные пользователи",
+      visits: "Входы в бот и приложение",
+      actions: "Все действия",
+    };
+    $("#admin-chart-title").textContent = titles[metric];
+    $$('[data-admin-metric]').forEach((button) => button.classList.toggle("active", button.dataset.adminMetric === metric));
+
+    const values = data.daily.map((item) => Number(item[metric] || 0));
+    const width = 640;
+    const height = 230;
+    const left = 38;
+    const right = 12;
+    const top = 18;
+    const bottom = 35;
+    const chartWidth = width - left - right;
+    const chartHeight = height - top - bottom;
+    const maxValue = Math.max(1, ...values);
+    const x = (index) => left + (values.length === 1 ? chartWidth / 2 : index * chartWidth / (values.length - 1));
+    const y = (value) => top + chartHeight - value * chartHeight / maxValue;
+    const points = values.map((value, index) => `${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
+    const areaPoints = values.map((value, index) => `${x(index).toFixed(1)} ${y(value).toFixed(1)}`).join(" L ");
+    const area = values.length
+      ? `M ${x(0).toFixed(1)} ${top + chartHeight} L ${areaPoints} L ${x(values.length - 1).toFixed(1)} ${top + chartHeight} Z`
+      : "";
+    const grid = [0, 0.5, 1].map((fraction) => {
+      const lineY = top + chartHeight * fraction;
+      const label = Math.round(maxValue * (1 - fraction));
+      return `<line x1="${left}" y1="${lineY}" x2="${width - right}" y2="${lineY}" class="chart-grid-line"/><text x="${left - 7}" y="${lineY + 4}" class="chart-y-label">${label}</text>`;
+    }).join("");
+    const labelCount = Math.min(5, data.daily.length);
+    const labelIndexes = new Set(Array.from({ length: labelCount }, (_, index) => Math.round(index * (data.daily.length - 1) / Math.max(labelCount - 1, 1))));
+    const labels = [...labelIndexes].map((index) => `<text x="${x(index)}" y="${height - 9}" class="chart-x-label">${shortDate(data.daily[index].date)}</text>`).join("");
+    const dots = values.length <= 31
+      ? values.map((value, index) => `<circle cx="${x(index)}" cy="${y(value)}" r="3.2" class="chart-dot"><title>${shortDate(data.daily[index].date)}: ${value}</title></circle>`).join("")
+      : "";
+    const total = values.reduce((sum, value) => sum + value, 0);
+    const average = values.length ? total / values.length : 0;
+
+    $("#admin-chart").innerHTML = `
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(titles[metric])} по дням">
+        ${grid}
+        <path d="${area}" class="chart-area"></path>
+        <polyline points="${points}" class="chart-line"></polyline>
+        ${dots}${labels}
+      </svg>
+      <div class="chart-summary"><span>Всего <b>${formatNumber(total)}</b></span><span>В среднем в день <b>${formatNumber(average, 1)}</b></span></div>`;
+  }
+
+  function analyticsBar(label, value, maxValue, detail = "") {
+    const width = maxValue ? Math.max(2, Math.round(value * 100 / maxValue)) : 0;
+    return `
+      <div class="analytics-row">
+        <div><span>${escapeHtml(label)}</span><small>${escapeHtml(detail)}</small><b>${formatNumber(value)}</b></div>
+        <i><span style="width:${width}%"></span></i>
+      </div>`;
+  }
+
+  function renderAdminDashboard() {
+    const data = state.adminData;
+    if (!data) return;
+    const summary = data.summary;
+    const generated = new Date(data.period.generated_at);
+    $("#admin-updated").textContent = `Обновлено ${generated.toLocaleDateString("ru-RU", { day: "numeric", month: "long" })} в ${generated.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`;
+    $("#admin-kpis").innerHTML = [
+      metricCard("Всего пользователей", formatNumber(summary.known_users), `${formatNumber(summary.new_users)} новых за период`),
+      metricCard("Активные", formatNumber(summary.active_users), `${formatNumber(summary.usage_rate, 1)}% всей базы`, "accent-blue"),
+      metricCard("Возвращаются", `${formatNumber(summary.returning_rate, 1)}%`, `${formatNumber(summary.returning_users)} человек`, "accent-coral"),
+      metricCard("Действий на человека", formatNumber(summary.actions_per_active, 1), comparisonCopy(summary.actions, summary.previous_actions), "accent-violet"),
+    ].join("");
+
+    $("#admin-engagement").innerHTML = [
+      metricCard("Реально пользуются", `${formatNumber(summary.engagement_rate, 1)}%`, `${formatNumber(summary.engaged_users)} совершали действия`, "compact"),
+      metricCard("Неактивны", formatNumber(summary.dormant_users), `не заходили ${data.days} дней`, "compact"),
+      metricCard("Входов на активного", formatNumber(summary.visits_per_active, 1), comparisonCopy(summary.visits, summary.previous_visits), "compact"),
+      metricCard("Активных дней", formatNumber(summary.active_days_per_user, 1), "в среднем на человека", "compact"),
+    ].join("");
+
+    const frequencyItems = [
+      ["Один день", data.frequency.one_day],
+      ["2–3 дня", data.frequency.two_three_days],
+      ["4–7 дней", data.frequency.four_seven_days],
+      ["8 дней и чаще", data.frequency.eight_plus_days],
+    ];
+    const frequencyMax = Math.max(1, ...frequencyItems.map(([, value]) => value));
+    $("#admin-frequency").innerHTML = frequencyItems.map(([label, value]) => analyticsBar(label, value, frequencyMax, "пользователей")).join("");
+
+    const featureMax = Math.max(1, ...data.top_features.map((item) => item.amount));
+    $("#admin-features").innerHTML = data.top_features.length
+      ? data.top_features.map((item) => analyticsBar(item.label, item.amount, featureMax, `${item.users} польз.`)).join("")
+      : `<div class="analytics-empty">За этот период действий пока нет.</div>`;
+
+    const sourceMax = Math.max(1, ...data.sources.map((item) => item.amount));
+    $("#admin-sources").innerHTML = data.sources.length
+      ? data.sources.map((item) => analyticsBar(item.label, item.amount, sourceMax, `${item.users} польз.`)).join("")
+      : `<div class="analytics-empty">Данных по каналам пока нет.</div>`;
+    renderAdminChart();
+  }
+
+  async function loadAdminAnalytics(force = false) {
+    if (!state.data?.is_admin || state.adminLoading) return;
+    if (state.adminData && !force && state.adminData.days === state.adminDays) {
+      renderAdminDashboard();
+      return;
+    }
+    state.adminLoading = true;
+    $("#admin-refresh").classList.add("loading");
+    $("#admin-updated").textContent = "Загружаем актуальные данные…";
+    try {
+      const isPreview = !tg?.initData && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+      state.adminData = isPreview ? localAdminPreview(state.adminDays) : await api(`/admin/analytics?days=${state.adminDays}`);
+      renderAdminDashboard();
+    } catch (error) {
+      $("#admin-updated").textContent = error.message || "Не удалось загрузить аналитику";
+    } finally {
+      state.adminLoading = false;
+      $("#admin-refresh").classList.remove("loading");
+    }
+  }
+
   function setTab(tab) {
-    if (!state.data.profile && tab !== "profile") tab = "profile";
+    if (tab === "admin" && !state.data.is_admin) tab = "feed";
+    if (!state.data.profile && tab !== "profile" && tab !== "admin") tab = "profile";
     state.tab = tab;
     $$(".panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab));
     $$(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
@@ -271,6 +481,7 @@
     if (tab === "my") renderMy();
     if (tab === "group") renderGroup();
     if (tab === "profile") renderProfile();
+    if (tab === "admin") void loadAdminAnalytics();
     trackMiniapp(`tab.${tab}`);
   }
 
@@ -392,7 +603,7 @@
           group_matching_enabled: groupMatchingEnabled,
         }),
       });
-      hydrateProfileForm(); renderFeed(); renderMy(); renderGroup();
+      configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderGroup();
       haptic("medium"); toast("Профиль сохранён"); setTab("feed");
     } catch (error) {
       errorBox.textContent = error.message;
@@ -490,6 +701,22 @@
       $$(".filter-chip").forEach((chip) => chip.classList.toggle("active", chip === button));
       renderMy();
     });
+    $("#admin-periods").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-admin-days]");
+      if (!button) return;
+      state.adminDays = Number(button.dataset.adminDays);
+      $$('[data-admin-days]').forEach((item) => item.classList.toggle("active", item === button));
+      haptic(); void loadAdminAnalytics(true);
+    });
+    $("#admin-chart-metrics").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-admin-metric]");
+      if (!button) return;
+      state.adminMetric = button.dataset.adminMetric;
+      haptic(); renderAdminChart();
+    });
+    $("#admin-refresh").addEventListener("click", () => {
+      haptic(); void loadAdminAnalytics(true);
+    });
     $("#modal-close").addEventListener("click", closeModal);
     $("#modal-backdrop").addEventListener("click", closeModal);
     tg?.BackButton?.onClick(closeModal);
@@ -504,7 +731,7 @@
     bindEvents();
     if (!tg?.initData && ["localhost", "127.0.0.1"].includes(window.location.hostname)) {
       state.data = structuredClone(LOCAL_PREVIEW);
-      hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
+      configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
       $("#loading").classList.add("hidden");
       $("#app").classList.remove("hidden");
       setTab("feed");
@@ -517,7 +744,7 @@
     }
     try {
       state.data = await api("/bootstrap");
-      hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
+      configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
       $("#loading").classList.add("hidden");
       $("#app").classList.remove("hidden");
       setTab(state.data.profile ? "feed" : "profile");

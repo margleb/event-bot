@@ -40,6 +40,7 @@ EVENT_LABELS = {
     "miniapp.tab.my": "Вкладка «Мои»",
     "miniapp.tab.group": "Вкладка «Группа»",
     "miniapp.tab.profile": "Вкладка «Профиль»",
+    "miniapp.tab.admin": "Вкладка «Аналитика»",
     "miniapp.event_details": "Карточка события",
     "miniapp.external_source": "Переход к источнику",
     "miniapp.profile_saved": "Сохранение профиля",
