@@ -224,6 +224,16 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS admin_report_deliveries (
+                admin_id      INTEGER NOT NULL,
+                report_date   TEXT NOT NULL,
+                delivered_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (admin_id, report_date)
+            )
+            """
+        )
+        conn.execute(
+            """
             -- Мероприятия. date хранится текстом "ГГГГ-ММ-ДД ЧЧ:ММ:СС",
             -- такой формат корректно сравнивается с datetime('now')
             CREATE TABLE IF NOT EXISTS events (
@@ -589,6 +599,32 @@ def mark_digest_sent(telegram_id: int, sent_on: date) -> None:
             WHERE telegram_id = ?
             """,
             (sent_on.isoformat(), telegram_id),
+        )
+
+
+def was_admin_report_sent(admin_id: int, report_date: date) -> bool:
+    """Проверяет, была ли администратору отправлена сводка в эту дату."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM admin_report_deliveries
+            WHERE admin_id = ? AND report_date = ?
+            """,
+            (admin_id, report_date.isoformat()),
+        ).fetchone()
+    return row is not None
+
+
+def mark_admin_report_sent(admin_id: int, report_date: date) -> None:
+    """Фиксирует отправку ежедневной сводки и защищает её от дублей."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO admin_report_deliveries (admin_id, report_date)
+            VALUES (?, ?)
+            """,
+            (admin_id, report_date.isoformat()),
         )
 
 

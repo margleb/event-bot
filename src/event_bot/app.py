@@ -13,6 +13,7 @@ from aiogram.types import (
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+from event_bot.admin_digest import run_admin_report_scheduler
 from event_bot.db import init_db
 from event_bot.analytics import UsageTrackingMiddleware, get_admin_ids
 from event_bot.digest import run_digest_scheduler
@@ -81,7 +82,10 @@ async def run() -> None:
     router.message.outer_middleware(UsageTrackingMiddleware())
     router.callback_query.outer_middleware(UsageTrackingMiddleware())
     dispatcher.include_router(router)
-    digest_task = asyncio.create_task(run_digest_scheduler(bot))
+    background_tasks = [
+        asyncio.create_task(run_digest_scheduler(bot)),
+        asyncio.create_task(run_admin_report_scheduler(bot)),
+    ]
 
     try:
         # polling — бот сам опрашивает Telegram о новых сообщениях.
@@ -95,9 +99,11 @@ async def run() -> None:
         )
     # закрываем соединения, даже если polling упал с ошибкой
     finally:
-        digest_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await digest_task
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         if openai_client is not None:
             await openai_client.close()
         await bot.session.close()

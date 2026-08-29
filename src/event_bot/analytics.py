@@ -4,16 +4,18 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
+from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from event_bot.db import get_connection
+from event_bot.db import DB_DATETIME_FORMAT, get_connection
 
 
 EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.:-]{1,80}$")
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 EVENT_LABELS = {
     "command.start": "Запуск бота",
@@ -350,6 +352,219 @@ def build_admin_report() -> dict[str, object]:
         "group_members": group_members,
         "last_activity": last_activity,
     }
+
+
+def build_daily_admin_report(
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Статистика за последние 24 часа и предшествующие им сутки."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    current = current.replace(microsecond=0)
+    started_at = current - timedelta(days=1)
+    previous_started_at = started_at - timedelta(days=1)
+    current_text = current.strftime(DB_DATETIME_FORMAT)
+    started_text = started_at.strftime(DB_DATETIME_FORMAT)
+    previous_started_text = previous_started_at.strftime(DB_DATETIME_FORMAT)
+
+    admin_ids = sorted(get_admin_ids())
+    admin_filter = (
+        f" AND user_id NOT IN ({','.join('?' for _ in admin_ids)})"
+        if admin_ids
+        else ""
+    )
+
+    def count_events(conn, start: str, end: str) -> int:
+        return conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM usage_events
+            WHERE created_at >= ? AND created_at < ?
+            """
+            + admin_filter,
+            (start, end, *admin_ids),
+        ).fetchone()["amount"]
+
+    def count_active(conn, start: str, end: str) -> int:
+        return conn.execute(
+            """
+            SELECT COUNT(DISTINCT user_id) AS amount
+            FROM usage_events
+            WHERE created_at >= ? AND created_at < ?
+            """
+            + admin_filter,
+            (start, end, *admin_ids),
+        ).fetchone()["amount"]
+
+    def count_visits(conn, start: str, end: str) -> int:
+        return conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM usage_events
+            WHERE created_at >= ? AND created_at < ?
+              AND event_name IN ('miniapp.open', 'command.start')
+            """
+            + admin_filter,
+            (start, end, *admin_ids),
+        ).fetchone()["amount"]
+
+    with get_connection() as conn:
+        if admin_ids:
+            placeholders = ",".join("?" for _ in admin_ids)
+            known_users = conn.execute(
+                f"""
+                SELECT COUNT(*) AS amount FROM (
+                    SELECT telegram_id AS user_id FROM users
+                    WHERE telegram_id NOT IN ({placeholders})
+                    UNION
+                    SELECT user_id FROM usage_events
+                    WHERE user_id NOT IN ({placeholders})
+                )
+                """,
+                (*admin_ids, *admin_ids),
+            ).fetchone()["amount"]
+        else:
+            known_users = conn.execute(
+                """
+                SELECT COUNT(*) AS amount FROM (
+                    SELECT telegram_id AS user_id FROM users
+                    UNION
+                    SELECT user_id FROM usage_events
+                )
+                """
+            ).fetchone()["amount"]
+
+        active = count_active(conn, started_text, current_text)
+        active_previous = count_active(
+            conn,
+            previous_started_text,
+            started_text,
+        )
+        actions = count_events(conn, started_text, current_text)
+        actions_previous = count_events(
+            conn,
+            previous_started_text,
+            started_text,
+        )
+        visits = count_visits(conn, started_text, current_text)
+        visits_previous = count_visits(
+            conn,
+            previous_started_text,
+            started_text,
+        )
+        new_users = conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM (
+                SELECT user_id, MIN(created_at) AS first_seen
+                FROM usage_events
+                GROUP BY user_id
+            ) AS first_usage
+            WHERE first_seen >= ? AND first_seen < ?
+            """
+            + admin_filter,
+            (started_text, current_text, *admin_ids),
+        ).fetchone()["amount"]
+        top_features = conn.execute(
+            """
+            SELECT event_name, COUNT(*) AS amount
+            FROM usage_events
+            WHERE created_at >= ? AND created_at < ?
+              AND event_name NOT IN (
+                  'command.admin', 'command.feedbacks', 'command.reply'
+              )
+            """
+            + admin_filter
+            + """
+            GROUP BY event_name
+            ORDER BY amount DESC, event_name
+            LIMIT 5
+            """,
+            (started_text, current_text, *admin_ids),
+        ).fetchall()
+        feedback_received = conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM feedback_messages
+            WHERE created_at >= ? AND created_at < ?
+            """
+            + admin_filter,
+            (started_text, current_text, *admin_ids),
+        ).fetchone()["amount"]
+        feedback_open = conn.execute(
+            "SELECT COUNT(*) AS amount FROM feedback_messages WHERE status = 'new'"
+            + admin_filter,
+            admin_ids,
+        ).fetchone()["amount"]
+        groups = conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
+            FROM interest_groups
+            """
+        ).fetchone()
+        group_members = conn.execute(
+            "SELECT COUNT(*) AS amount FROM interest_group_members"
+        ).fetchone()["amount"]
+
+    started_msk = started_at.astimezone(MOSCOW_TZ)
+    current_msk = current.astimezone(MOSCOW_TZ)
+    return {
+        "period": (
+            f"{started_msk.strftime('%d.%m %H:%M')}–"
+            f"{current_msk.strftime('%d.%m %H:%M')} МСК"
+        ),
+        "known_users": known_users,
+        "active": active,
+        "active_previous": active_previous,
+        "new_users": new_users,
+        "visits": visits,
+        "visits_previous": visits_previous,
+        "actions": actions,
+        "actions_previous": actions_previous,
+        "top_features": [
+            (row["event_name"], row["amount"]) for row in top_features
+        ],
+        "feedback_received": feedback_received,
+        "feedback_open": feedback_open,
+        "groups_total": groups["total"] or 0,
+        "groups_active": groups["active"] or 0,
+        "group_members": group_members,
+    }
+
+
+def format_daily_admin_report(report: dict[str, object]) -> str:
+    """Компактное Telegram-сообщение с ежедневной статистикой."""
+    top = report["top_features"]
+    top_lines = [
+        f"• {escape(EVENT_LABELS.get(name, name))} — <b>{amount}</b>"
+        for name, amount in top
+    ] or ["• Пока нет данных"]
+    return (
+        "📈 <b>Ежедневная сводка</b>\n"
+        f"<i>{escape(str(report['period']))}</i>\n\n"
+        f"👤 Активные: <b>{report['active']}</b> · "
+        f"сутками ранее {report['active_previous']}\n"
+        f"🆕 Новые пользователи: <b>{report['new_users']}</b>\n"
+        f"🚪 Входы: <b>{report['visits']}</b> · "
+        f"сутками ранее {report['visits_previous']}\n"
+        f"🧭 Действия: <b>{report['actions']}</b> · "
+        f"сутками ранее {report['actions_previous']}\n\n"
+        "<b>Чем пользовались</b>\n"
+        + "\n".join(top_lines)
+        + "\n\n"
+        f"💬 Обращения: за сутки — <b>{report['feedback_received']}</b> · "
+        f"ждут ответа — <b>{report['feedback_open']}</b>\n"
+        f"🤝 Группы: готовых — <b>{report['groups_active']}</b> / "
+        f"всего — <b>{report['groups_total']}</b> · участников — "
+        f"<b>{report['group_members']}</b>\n"
+        f"👥 Всего пользователей: <b>{report['known_users']}</b>\n\n"
+        "Подробный отчёт: /admin · обращения: /feedbacks"
+    )
 
 
 def format_admin_report(report: dict[str, object]) -> str:
