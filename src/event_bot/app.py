@@ -1,12 +1,14 @@
 # src/event_bot/app.py
 import asyncio
 import os
+from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from event_bot.db import init_db
+from event_bot.digest import run_digest_scheduler
 from event_bot.embedding_provider import EmbeddingProvider
 from event_bot.handlers import router
 from event_bot.profile_service import ProfileExtractor
@@ -41,6 +43,7 @@ async def run() -> None:
     # Dispatcher принимает апдейты от Telegram и раздаёт их роутерам
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
+    digest_task = asyncio.create_task(run_digest_scheduler(bot))
 
     try:
         # polling — бот сам опрашивает Telegram о новых сообщениях.
@@ -54,6 +57,9 @@ async def run() -> None:
         )
     # закрываем соединения, даже если polling упал с ошибкой
     finally:
+        digest_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await digest_task
         if openai_client is not None:
             await openai_client.close()
         await bot.session.close()

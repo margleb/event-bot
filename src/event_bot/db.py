@@ -3,7 +3,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from html import escape
 from pathlib import Path
 from typing import Iterator
@@ -62,6 +62,37 @@ INTENT_STATUS_LABELS = {
 
 WEEKDAYS_RU = ("понедельник", "вторник", "среда", "четверг",
                "пятница", "суббота", "воскресенье")
+
+PROFILE_WEEKDAYS = {
+    "mon": 0,
+    "monday": 0,
+    "пн": 0,
+    "понедельник": 0,
+    "tue": 1,
+    "tuesday": 1,
+    "вт": 1,
+    "вторник": 1,
+    "wed": 2,
+    "wednesday": 2,
+    "ср": 2,
+    "среда": 2,
+    "thu": 3,
+    "thursday": 3,
+    "чт": 3,
+    "четверг": 3,
+    "fri": 4,
+    "friday": 4,
+    "пт": 4,
+    "пятница": 4,
+    "sat": 5,
+    "saturday": 5,
+    "сб": 5,
+    "суббота": 5,
+    "sun": 6,
+    "sunday": 6,
+    "вс": 6,
+    "воскресенье": 6,
+}
 
 
 @contextmanager
@@ -127,6 +158,9 @@ def init_db() -> None:
                 profile_embedding_model TEXT,
                 avoid_embedding         BLOB,
                 avoid_embedding_model   TEXT,
+                digest_weekday INTEGER,
+                digest_enabled INTEGER NOT NULL DEFAULT 0,
+                last_digest_date TEXT,
                 created_at     TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
@@ -216,6 +250,11 @@ def init_db() -> None:
         _add_column_if_missing(conn, "users", "profile_embedding_model", "TEXT")
         _add_column_if_missing(conn, "users", "avoid_embedding", "BLOB")
         _add_column_if_missing(conn, "users", "avoid_embedding_model", "TEXT")
+        _add_column_if_missing(conn, "users", "digest_weekday", "INTEGER")
+        _add_column_if_missing(
+            conn, "users", "digest_enabled", "INTEGER NOT NULL DEFAULT 0"
+        )
+        _add_column_if_missing(conn, "users", "last_digest_date", "TEXT")
         _add_column_if_missing(
             conn, "intents", "visibility_asked", "INTEGER NOT NULL DEFAULT 0"
         )
@@ -386,6 +425,86 @@ def get_user_profile_embeddings(
     )
 
 
+def set_digest_schedule(telegram_id: int, weekday: int | None) -> bool:
+    """Включает рассылку в день 0..6 или отключает её через None."""
+    if weekday is not None and weekday not in range(7):
+        raise ValueError("weekday должен быть от 0 до 6")
+
+    with get_connection() as conn:
+        if weekday is None:
+            cursor = conn.execute(
+                """
+                UPDATE users
+                SET digest_enabled = 0, digest_weekday = NULL
+                WHERE telegram_id = ?
+                """,
+                (telegram_id,),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE users
+                SET digest_enabled = 1,
+                    last_digest_date = CASE
+                        WHEN digest_weekday = ? THEN last_digest_date
+                        ELSE NULL
+                    END,
+                    digest_weekday = ?
+                WHERE telegram_id = ?
+                """,
+                (weekday, weekday, telegram_id),
+            )
+    return cursor.rowcount > 0
+
+
+def get_digest_schedule(telegram_id: int) -> int | None:
+    """День активной еженедельной рассылки или None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT digest_weekday, digest_enabled
+            FROM users
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+    if row is None or not row["digest_enabled"]:
+        return None
+    return row["digest_weekday"]
+
+
+def get_due_digest_user_ids(weekday: int, sent_on: date) -> list[int]:
+    """Пользователи, которым подборка ещё не отправлялась в эту дату."""
+    if weekday not in range(7):
+        raise ValueError("weekday должен быть от 0 до 6")
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT telegram_id
+            FROM users
+            WHERE digest_enabled = 1
+              AND digest_weekday = ?
+              AND (last_digest_date IS NULL OR last_digest_date != ?)
+            ORDER BY telegram_id
+            """,
+            (weekday, sent_on.isoformat()),
+        ).fetchall()
+    return [row["telegram_id"] for row in rows]
+
+
+def mark_digest_sent(telegram_id: int, sent_on: date) -> None:
+    """Фиксирует доставку, чтобы рестарт не создал повторную рассылку."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET last_digest_date = ?
+            WHERE telegram_id = ?
+            """,
+            (sent_on.isoformat(), telegram_id),
+        )
+
+
 def _row_to_event(row: sqlite3.Row) -> Event:
     """Строка таблицы events -> модель Event."""
     return Event(
@@ -440,6 +559,16 @@ def _rank_by_tags(events: list[Event], profile: Profile) -> list[Event]:
         events,
         key=lambda event: (-_score(event, interests, avoid), event.date),
     )
+
+
+def _preferred_weekday_numbers(days: list[str] | None) -> set[int]:
+    if not days:
+        return set()
+    return {
+        PROFILE_WEEKDAYS[day.strip().lower()]
+        for day in days
+        if day.strip().lower() in PROFILE_WEEKDAYS
+    }
 
 
 def _rank_by_embeddings(
@@ -536,10 +665,14 @@ def find_events(
     with get_connection() as conn:
         rows = conn.execute(" ".join(query), params).fetchall()
 
+    preferred_weekdays = _preferred_weekday_numbers(profile.days)
     candidates: list[tuple[Event, sqlite3.Row]] = []
     for row in rows:
         try:
-            candidates.append((_row_to_event(row), row))
+            event = _row_to_event(row)
+            if preferred_weekdays and event.date.weekday() not in preferred_weekdays:
+                continue
+            candidates.append((event, row))
         except (TypeError, ValueError, json.JSONDecodeError):
             # Одна повреждённая строка не должна ломать /find для всех
             # пользователей. Импорт валидирует новые даты отдельно.

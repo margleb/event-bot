@@ -22,6 +22,7 @@ from event_bot.db import (
     format_event_card,
     format_intent_card,
     format_request_notification,
+    get_digest_schedule,
     get_user_intent,
     get_user_intents,
     get_user_profile,
@@ -31,9 +32,11 @@ from event_bot.db import (
     reject_connection_request,
     save_intent,
     save_user_profile,
+    set_digest_schedule,
     set_intent_visibility,
     update_user_identity,
 )
+from event_bot.digest import DIGEST_WEEKDAY_LABELS
 from event_bot.embedding_provider import (
     EmbeddingProvider,
     profile_embedding_text,
@@ -41,6 +44,7 @@ from event_bot.embedding_provider import (
 )
 from event_bot.keyboards import (
     companion_keyboard,
+    digest_weekday_keyboard,
     intent_card_keyboard,
     intent_keyboard,
     profile_keyboard,
@@ -49,7 +53,13 @@ from event_bot.keyboards import (
     visibility_keyboard,
 )
 from event_bot.models import Profile
-from event_bot.profile_service import ProfileExtractor, format_profile
+from event_bot.profile_service import (
+    ProfileExtractor,
+    build_profile_input,
+    clarification_question,
+    format_profile,
+    next_clarification_field,
+)
 from event_bot.storage import ProfileStore
 
 
@@ -118,6 +128,7 @@ async def start(message: Message) -> None:
         "что тебе интересно, когда обычно удобно, "
         "какой бюджет и какая компания комфортна.\n\n"
         "Потом /find — подберу мероприятия, /profile — покажу профиль,\n"
+        "/schedule — настроит еженедельную подборку,\n"
         "/my — что ты уже отметил."
     )
 
@@ -139,6 +150,7 @@ async def show_profile(
         return
 
     # кладём профиль в черновики: кнопка «Верно» подтверждает именно черновик
+    profile_store.clear_clarification(message.from_user.id)
     profile_store.drafts[message.from_user.id] = profile
     await message.answer(
         format_profile(profile),
@@ -214,6 +226,27 @@ async def my_events(message: Message) -> None:
         )
 
 
+@router.message(Command("schedule"))
+async def show_digest_schedule(message: Message) -> None:
+    """Показывает и меняет день еженедельной персональной подборки."""
+    if message.from_user is None:
+        return
+    if get_user_profile(message.from_user.id) is None:
+        await message.answer(NO_PROFILE_TEXT)
+        return
+
+    weekday = get_digest_schedule(message.from_user.id)
+    if weekday is None:
+        text = "Еженедельная подборка пока выключена. Выбери день отправки:"
+    else:
+        text = (
+            "Сейчас подборка приходит по "
+            f"{DIGEST_WEEKDAY_LABELS[weekday]} после 10:00 по Москве.\n"
+            "Можно выбрать другой день или отключить её:"
+        )
+    await message.answer(text, reply_markup=digest_weekday_keyboard())
+
+
 # F.text — любое текстовое сообщение, не подошедшее под фильтры выше:
 # считаем, что человек рассказывает о своих предпочтениях
 @router.message(F.text)
@@ -231,17 +264,42 @@ async def handle_profile_text(
         )
         return
 
+    user_id = message.from_user.id
+    inputs = profile_store.draft_inputs.setdefault(user_id, [])
+    inputs.append(message.text)
+    answered_field = profile_store.awaiting_clarification.pop(user_id, None)
+
     try:
-        # поход в OpenAI: текст -> структурированная модель Profile
-        profile = await profile_extractor.extract(message.text)
+        # Полный контекст сохраняет уже названное между уточняющими ответами.
+        profile = await profile_extractor.extract(build_profile_input(inputs))
     except (OpenAIError, ValueError):
+        inputs.pop()
+        if not inputs:
+            profile_store.draft_inputs.pop(user_id, None)
+        if answered_field is not None:
+            profile_store.awaiting_clarification[user_id] = answered_field
         await message.answer(
             "Не получилось разобрать предпочтения. Попробуй ещё раз."
         )
         return
 
+    if answered_field is not None:
+        profile_store.clarified_fields.setdefault(user_id, set()).add(
+            answered_field
+        )
+
     # в базу пока не пишем — сначала пользователь должен подтвердить
-    profile_store.drafts[message.from_user.id] = profile
+    profile_store.drafts[user_id] = profile
+    missing_field = next_clarification_field(
+        profile,
+        profile_store.clarified_fields.get(user_id),
+    )
+    if missing_field is not None:
+        profile_store.awaiting_clarification[user_id] = missing_field
+        await message.answer(clarification_question(missing_field))
+        return
+
+    profile_store.clear_clarification(user_id)
     await message.answer(
         format_profile(profile),
         reply_markup=profile_keyboard(),
@@ -302,7 +360,10 @@ async def confirm_profile(
         # убираем кнопки, чтобы нельзя было подтвердить второй раз
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
-            "Профиль сохранён ✅\nТеперь напиши /find — подберу мероприятия."
+            "Профиль сохранён ✅\nТеперь напиши /find — подберу мероприятия.\n\n"
+            "В какой день присылать персональную подборку каждую неделю? "
+            "Отправка будет после 10:00 по Москве.",
+            reply_markup=digest_weekday_keyboard(),
         )
     # обязательный ответ Telegram: без него на кнопке крутятся «часики»
     await callback.answer()
@@ -314,12 +375,50 @@ async def edit_profile(
     profile_store: ProfileStore,
 ) -> None:
     # выбрасываем черновик: следующее сообщение соберёт профиль заново
-    profile_store.drafts.pop(callback.from_user.id, None)
+    profile_store.discard_draft(callback.from_user.id)
     if isinstance(callback.message, Message):
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
             "Напиши предпочтения ещё раз — я обновлю профиль."
         )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("digest:"))
+async def set_weekly_digest(callback: CallbackQuery) -> None:
+    """Сохраняет выбранный день или отключает автоматическую рассылку."""
+    data = callback.data or ""
+    weekday: int | None
+    if data == "digest:off":
+        weekday = None
+    else:
+        parts = data.split(":")
+        if (
+            len(parts) != 3
+            or parts[:2] != ["digest", "set"]
+            or not parts[2].isdigit()
+        ):
+            await callback.answer()
+            return
+        weekday = int(parts[2])
+        if weekday not in range(7):
+            await callback.answer()
+            return
+
+    if not set_digest_schedule(callback.from_user.id, weekday):
+        await callback.answer("Сначала заполни профиль.", show_alert=True)
+        return
+
+    if isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(reply_markup=None)
+        if weekday is None:
+            text = "Еженедельная подборка отключена. Включить её можно через /schedule."
+        else:
+            text = (
+                "Готово: буду присылать подборку по "
+                f"{DIGEST_WEEKDAY_LABELS[weekday]} после 10:00 по Москве."
+            )
+        await callback.message.answer(text)
     await callback.answer()
 
 

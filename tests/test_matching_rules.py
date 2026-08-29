@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -90,3 +90,15 @@ def test_disabled_embeddings_fall_back_to_tags_without_error(event_factory):
     )
 
     assert found[0].title == "Спектакль"
+
+
+def test_profile_days_filter_events_before_ranking(event_factory):
+    start = datetime(2099, 1, 1, 19, 0)
+    monday = start + timedelta(days=(7 - start.weekday()) % 7)
+    tuesday = monday + timedelta(days=1)
+    event_factory(title="В понедельник", date=monday, external_id="monday")
+    event_factory(title="Во вторник", date=tuesday, external_id="tuesday")
+
+    found = db.find_events(Profile(interests=["музыка"], days=["mon"]))
+
+    assert [event.title for event in found] == ["В понедельник"]

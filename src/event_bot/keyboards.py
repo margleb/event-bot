@@ -4,6 +4,17 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+DIGEST_WEEKDAY_BUTTONS = (
+    ("Пн", 0),
+    ("Вт", 1),
+    ("Ср", 2),
+    ("Чт", 3),
+    ("Пт", 4),
+    ("Сб", 5),
+    ("Вс", 6),
+)
+
+
 def profile_keyboard() -> InlineKeyboardMarkup:
     """Кнопки под распознанным профилем."""
     # список списков = строки кнопок; тут одна строка из двух кнопок
@@ -19,6 +30,29 @@ def profile_keyboard() -> InlineKeyboardMarkup:
                     callback_data="profile_edit",
                 ),
             ]
+        ]
+    )
+
+
+def digest_weekday_keyboard() -> InlineKeyboardMarkup:
+    """День еженедельной персональной подборки и отключение рассылки."""
+    buttons = [
+        InlineKeyboardButton(
+            text=label,
+            callback_data=f"digest:set:{weekday}",
+        )
+        for label, weekday in DIGEST_WEEKDAY_BUTTONS
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            buttons[:4],
+            buttons[4:],
+            [
+                InlineKeyboardButton(
+                    text="🔕 Не присылать",
+                    callback_data="digest:off",
+                )
+            ],
         ]
     )
 
