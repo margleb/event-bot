@@ -26,6 +26,13 @@
     timepad: { name: "timepad", mark: "tp" },
     ticketmaster: { name: "Ticketmaster", mark: "★" },
   };
+  const EVENT_IMAGES = {
+    "Концерты": "https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?w=900&h=520&fit=crop&auto=format",
+    "Выставки": "https://images.unsplash.com/photo-1541367777708-7905fe3296c0?w=900&h=520&fit=crop&auto=format",
+    "Стендап": "https://images.unsplash.com/photo-1527224857830-43a7acc85260?w=900&h=520&fit=crop&auto=format",
+    "Лекции": "https://images.unsplash.com/photo-1486325212027-8081e485255e?w=900&h=520&fit=crop&auto=format",
+    "Прогулки": "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=900&h=520&fit=crop&auto=format",
+  };
   const LOCAL_PREVIEW = {
     user: { id: 1, first_name: "Дима", username: "preview", photo_url: null },
     is_admin: true,
@@ -122,6 +129,8 @@
     group: [null, null],
     feedCategory: "Все",
     selectedEventGroupId: null,
+    groupDetailOpen: false,
+    profileEditorOpen: false,
     companyModalEventId: null,
     modalEventId: null,
     adminData: null,
@@ -201,6 +210,19 @@
     return "Концерты";
   }
 
+  function eventImage(event) {
+    return event.image_url || EVENT_IMAGES[categoryFor(event)] || EVENT_IMAGES["Концерты"];
+  }
+
+  function countdownFor(raw) {
+    const target = new Date(raw);
+    const now = new Date();
+    const days = Math.max(0, Math.ceil((target.getTime() - now.getTime()) / 86400000));
+    if (days === 0) return "Сегодня";
+    if (days === 1) return "Завтра";
+    return `Через ${days} ${days % 10 === 1 && days % 100 !== 11 ? "день" : [2, 3, 4].includes(days % 10) && ![12, 13, 14].includes(days % 100) ? "дня" : "дней"}`;
+  }
+
   function companyAction(event) {
     if (event.company_group_id) {
       return `<button class="company-button joined" data-open-company="${event.company_group_id}" type="button">Открыть компанию <span>→</span></button>`;
@@ -216,34 +238,46 @@
 
   function eventCard(event, showVisibility = false) {
     const date = formatWhen(event.date);
-    const variant = variantFor(event);
     const place = [event.venue, event.address].filter(Boolean).join(" · ");
     const category = categoryFor(event);
-    const tags = (event.tags || []).slice(0, 2).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const visibility = showVisibility && ["going", "interested"].includes(event.intent)
       ? `<div class="visibility-row"><span>Видно другим участникам</span><button class="switch ${event.visible ? "on" : ""}" data-visible="${!event.visible}" data-id="${event.id}" aria-label="Изменить видимость"></button></div>`
       : "";
     return `
       <article class="event-card" data-event-id="${event.id}">
-        <div class="card-visual variant-${variant}">
+        <button class="card-visual" data-open="${event.id}" type="button" aria-label="Подробнее о мероприятии" style="background-image:url('${escapeHtml(eventImage(event))}')">
+          <span class="image-shade"></span>
           ${sourceBadge(event)}
-          <span class="event-glyph">${GLYPHS[variant]}</span>
-          <div class="date-tile"><b>${date.day}</b><span>${date.month}</span></div>
-          <span class="visual-price">${escapeHtml(event.price)}</span>
-        </div>
+          ${event.company_count > 0 ? `<span class="waiting-signal"><i>● ●</i><b>${event.company_count > 1 ? `Уже ищут компанию: ${event.company_count}` : "Ищут: 1"}</b></span>` : ""}
+          <span class="card-overlay-tags"><i>${escapeHtml(category)}</i><i>${escapeHtml(countdownFor(event.date))}</i></span>
+        </button>
         <div class="card-body">
-          <div class="event-context"><span>${escapeHtml(category)}</span><span>${formatWhen(event.date, true)}</span></div>
-          <div class="card-title-row"><h3 class="card-title">${escapeHtml(event.title)}</h3><button class="open-card" data-open="${event.id}" aria-label="Подробнее">↗</button></div>
+          <button class="card-title" data-open="${event.id}" type="button">${escapeHtml(event.title)}</button>
           <div class="card-meta">
-            <span><b>◷</b>${date.time}</span>
+            <span><b>◷</b>${escapeHtml(formatWhen(event.date, true))}</span>
             <span><b>⌖</b>${escapeHtml(place || "Москва")}</span>
           </div>
-          <div class="tag-row">${tags}</div>
-          <div class="company-signal">${event.company_count > 0 ? `<span class="mini-people">● ●</span><b>Ищут компанию: ${event.company_count}</b>` : "Можно начать поиск компании"}</div>
-          <div class="card-actions">${eventActions(event)}</div>
+          <div class="card-footer">
+            <div class="card-actions">${eventActions(event)}</div>
+            <span class="price-pill">${escapeHtml(event.price)}</span>
+          </div>
           ${visibility}
         </div>
       </article>`;
+  }
+
+  function myEventCard(event) {
+    const status = event.company_status === "active"
+      ? ["Группа собрана", "success"]
+      : event.company_group_id
+        ? ["Ищу компанию", "waiting"]
+        : [event.intent === "going" ? "Иду" : "Сохранено", "saved"];
+    return `
+      <button class="my-event-card" type="button" ${event.company_group_id ? `data-open-company="${event.company_group_id}"` : `data-open="${event.id}"`}>
+        <span class="my-event-image" style="background-image:url('${escapeHtml(eventImage(event))}')"><i class="my-status ${status[1]}">${status[0]}</i></span>
+        <span class="my-event-copy"><b>${escapeHtml(event.title)}</b><small>${escapeHtml(formatWhen(event.date, true))}</small><small>${escapeHtml(event.price)}</small></span>
+        <span class="my-chevron">›</span>
+      </button>`;
   }
 
   function emptyState(kind) {
@@ -253,10 +287,6 @@
 
   function renderHeader() {
     const user = state.data.user;
-    const titles = { feed: "Афиша Москвы", profile: "Ваш профиль", my: "Ваши планы", group: "Компания", admin: "Работа бота" };
-    const kickers = { feed: "МСК.Митап · МОСКВА", group: "ЛЮДИ НА ВЫБРАННОЕ СОБЫТИЕ", admin: "АНАЛИТИКА · АКТУАЛЬНЫЕ ДАННЫЕ" };
-    $("#header-title").textContent = titles[state.tab] || `Привет, ${user.first_name}!`;
-    $("#header-kicker").textContent = kickers[state.tab] || "ВАШИ НАСТРОЙКИ";
     const avatar = $("#avatar");
     avatar.textContent = (user.first_name || "М").slice(0, 1).toUpperCase();
     if (user.photo_url) avatar.innerHTML = `<img src="${escapeHtml(user.photo_url)}" alt="">`;
@@ -264,13 +294,14 @@
 
   function renderFeed() {
     const events = (state.data.events || []).filter((event) => state.feedCategory === "Все" || categoryFor(event) === state.feedCategory);
+    $("#company-nav-dot").classList.toggle("hidden", !(state.data.event_groups || []).some((group) => group.status !== "active"));
     $("#event-count").textContent = events.length;
     $("#event-list").innerHTML = events.length ? events.map((event) => eventCard(event)).join("") : emptyState("feed");
   }
 
   function renderMy() {
     const events = (state.data.my_events || []).filter((event) => state.myFilter === "all" || event.intent === state.myFilter);
-    $("#my-event-list").innerHTML = events.length ? events.map((event) => eventCard(event, true)).join("") : emptyState("my");
+    $("#my-event-list").innerHTML = events.length ? events.map((event) => myEventCard(event)).join("") : emptyState("my");
   }
 
   function choiceButton(label, selected, attrs = "", custom = false) {
@@ -304,7 +335,19 @@
   }
 
   function renderProfile() {
-    $("#onboarding-copy").classList.toggle("hidden", Boolean(state.data.profile));
+    const user = state.data.user || {};
+    const initial = (user.first_name || "М").slice(0, 1).toLocaleUpperCase("ru");
+    const avatar = $("#profile-avatar");
+    avatar.textContent = initial;
+    if (user.photo_url) avatar.innerHTML = `<img src="${escapeHtml(user.photo_url)}" alt="">`;
+    $("#profile-identity").textContent = `${user.username ? `@${user.username} · ` : ""}Москва`;
+    const onboarding = !state.data.profile;
+    if (onboarding) state.profileEditorOpen = true;
+    $("#profile-summary").classList.toggle("hidden", state.profileEditorOpen);
+    $("#profile-menu").classList.toggle("hidden", state.profileEditorOpen);
+    $("#profile-editor").classList.toggle("hidden", !state.profileEditorOpen);
+    $("#profile-editor-back").classList.toggle("hidden", onboarding);
+    $("#onboarding-copy").classList.toggle("hidden", !onboarding);
   }
 
   function groupConnectionActions(member, groupId) {
@@ -345,22 +388,39 @@
       </section>`;
   }
 
-  function companySwitcher(groups, selectedId) {
-    if (groups.length < 2) return "";
-    return `<div class="company-switcher">${groups.map((group) => `<button type="button" class="${group.id === selectedId ? "active" : ""}" data-select-company="${group.id}">${escapeHtml(group.event.title)}</button>`).join("")}</div>`;
-  }
-
   function renderGroup() {
     const container = $("#group-content");
     const groups = state.data.event_groups || [];
+    $("#company-nav-dot").classList.toggle("hidden", !groups.some((group) => group.status !== "active"));
     if (!groups.length) {
       container.innerHTML = `
+        <div class="screen-heading"><h1>Компания</h1><p>Здесь появятся группы по выбранным мероприятиям</p></div>
         <div class="group-disabled">
-          <div class="group-disabled-art" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="empty-people" aria-hidden="true"><i>А</i><i>М</i><i>Вы</i></div>
           <h3>Сначала выберите событие</h3>
           <p>Нажмите «Найти компанию» в карточке мероприятия. Мы соберём 2–5 человек, которые хотят пойти именно туда.</p>
           <button class="primary-button" type="button" data-tab="feed">Открыть афишу</button>
         </div>`;
+      return;
+    }
+    if (!state.groupDetailOpen) {
+      container.innerHTML = `
+        <div class="screen-heading"><h1>Компания</h1><p>Ваши группы по конкретным мероприятиям</p></div>
+        <div class="company-list">${groups.map((item) => {
+          const active = item.status === "active";
+          const missing = Math.max(0, item.minimum_members - item.member_count);
+          const initials = (item.members || []).slice(0, 3).map((member, index) => `<i style="z-index:${4 - index}">${escapeHtml((member.name || "У").slice(0, 1).toLocaleUpperCase("ru"))}</i>`).join("");
+          return `<button class="company-list-card" type="button" data-select-company="${item.id}">
+            <span class="company-list-image" style="background-image:url('${escapeHtml(eventImage(item.event))}')"></span>
+            <span class="company-list-copy">
+              <em class="company-state ${active ? "success" : "waiting"}">${active ? "Группа собрана" : "Ищем людей"}</em>
+              <b>${escapeHtml(item.event.title)}</b>
+              <small>${escapeHtml(formatWhen(item.event.date, true))}</small>
+              <span class="company-members">${initials}<strong>${item.member_count}/${item.maximum_members}</strong></span>
+              <span class="company-next">${active ? "Открыть чат и подтвердить участие" : missing === 1 ? "Ждём ещё 1 человека" : `Ждём ещё ${missing} человек`} <i>›</i></span>
+            </span>
+          </button>`;
+        }).join("")}</div>`;
       return;
     }
     if (!groups.some((group) => group.id === state.selectedEventGroupId)) state.selectedEventGroupId = groups[0].id;
@@ -401,10 +461,12 @@
       <div class="member-list">${members}</div>
       ${groupChat(group)}`;
     container.innerHTML = `
-      ${companySwitcher(groups, group.id)}
+      <button class="company-back" type="button" data-company-list>‹ <span>Все компании</span></button>
       <article class="group-hero">
+        <span class="group-hero-image" style="background-image:url('${escapeHtml(eventImage(event))}')"></span>
+        <span class="group-hero-shade"></span>
         ${sourceBadge(event)}
-        <span class="group-status">${ready ? "КОМПАНИЯ СОБРАНА" : "ИДЁТ ПОИСК"}</span>
+        <span class="group-status ${ready ? "success" : "waiting"}">${ready ? "ГРУППА СОБРАНА" : "ИДЁТ ПОИСК"}</span>
         <h3>${escapeHtml(event.title)}</h3>
         <p>${formatWhen(event.date, true)} · ${escapeHtml(event.venue || event.address || "Москва")}</p>
         <button class="group-event-open" type="button" data-open="${event.id}">Открыть мероприятие ↗</button>
@@ -444,6 +506,7 @@
     const allowed = Boolean(state.data?.is_admin);
     $("#admin-nav-button").classList.add("hidden");
     $("#admin-profile-button").classList.toggle("hidden", !allowed);
+    $("#admin-profile-menu-button").classList.toggle("hidden", !allowed);
     $("#bottom-nav").classList.remove("admin-enabled");
     if (!allowed && state.tab === "admin") setTab("feed");
   }
@@ -693,7 +756,7 @@
     if (!tg?.initData) {
       const preview = state.data.event_groups?.[0];
       closeCompanyModal();
-      if (preview) { state.selectedEventGroupId = preview.id; setTab("group"); }
+      if (preview) { state.selectedEventGroupId = preview.id; state.groupDetailOpen = true; setTab("group"); }
       else toast("В режиме просмотра поиск не запускается");
       return;
     }
@@ -702,6 +765,7 @@
     try {
       const result = await api(`/events/${eventId}/company`, { method: "POST" });
       mergeEventGroup(result.event_group);
+      state.groupDetailOpen = true;
       closeCompanyModal();
       haptic("medium");
       setTab("group");
@@ -712,6 +776,7 @@
 
   function openEventCompany(groupId) {
     state.selectedEventGroupId = Number(groupId);
+    state.groupDetailOpen = true;
     setTab("group");
   }
 
@@ -727,6 +792,7 @@
         }
       }
       state.selectedEventGroupId = state.data.event_groups[0]?.id || null;
+      if (!state.data.event_groups.length) state.groupDetailOpen = false;
       renderFeed(); renderMy(); renderGroup();
       toast("Поиск отменён");
     } catch (error) { toast(error.message); }
@@ -804,7 +870,8 @@
     state.modalEventId = event.id;
     const variant = variantFor(event);
     $("#modal-visual").className = `modal-visual variant-${variant}`;
-    $("#modal-visual span").textContent = GLYPHS[variant];
+    $("#modal-visual").style.backgroundImage = `url('${eventImage(event)}')`;
+    $("#modal-visual span").textContent = "";
     $("#modal-date").textContent = formatWhen(event.date, true).toLocaleUpperCase("ru");
     $("#modal-title").textContent = event.title;
     $("#modal-meta").innerHTML = `<span>⌖ ${escapeHtml([event.venue, event.address].filter(Boolean).join(" · ") || "Москва")}</span><span>Билет: ${escapeHtml(event.price)}</span>`;
@@ -870,6 +937,7 @@
         }),
       });
       configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderGroup();
+      state.profileEditorOpen = false;
       haptic("medium"); toast("Профиль сохранён"); setTab("feed");
     } catch (error) {
       errorBox.textContent = error.message;
@@ -919,7 +987,11 @@
   function bindEvents() {
     $("#bottom-nav").addEventListener("click", (event) => {
       const button = event.target.closest("[data-tab]");
-      if (button) { haptic(); setTab(button.dataset.tab); }
+      if (button) {
+        if (button.dataset.tab === "group") state.groupDetailOpen = false;
+        if (button.dataset.tab === "profile" && state.data.profile) state.profileEditorOpen = false;
+        haptic(); setTab(button.dataset.tab);
+      }
     });
     document.addEventListener("click", (event) => {
       const tab = event.target.closest("[data-tab]");
@@ -935,7 +1007,9 @@
       const openCompany = event.target.closest("[data-open-company]");
       if (openCompany) openEventCompany(Number(openCompany.dataset.openCompany));
       const selectCompany = event.target.closest("[data-select-company]");
-      if (selectCompany) { state.selectedEventGroupId = Number(selectCompany.dataset.selectCompany); haptic(); renderGroup(); }
+      if (selectCompany) { state.selectedEventGroupId = Number(selectCompany.dataset.selectCompany); state.groupDetailOpen = true; haptic(); renderGroup(); }
+      const companyList = event.target.closest("[data-company-list]");
+      if (companyList) { state.groupDetailOpen = false; haptic(); renderGroup(); }
       const leaveCompany = event.target.closest("[data-leave-company]");
       if (leaveCompany) void leaveEventCompany(Number(leaveCompany.dataset.leaveCompany));
       const rsvp = event.target.closest("[data-event-rsvp]");
@@ -946,6 +1020,16 @@
       if (connectionResponse) void respondEventContact(Number(connectionResponse.dataset.groupId), Number(connectionResponse.dataset.requestId), connectionResponse.dataset.eventConnectionAction);
       const source = event.target.closest("#modal-source");
       if (source) trackMiniapp("external_source");
+      const profileSection = event.target.closest("[data-profile-section]");
+      if (profileSection) {
+        state.profileEditorOpen = true;
+        renderProfile();
+        const targets = { notifications: ".digest-section", feedback: ".feedback-section" };
+        const target = targets[profileSection.dataset.profileSection];
+        if (target) requestAnimationFrame(() => $(target)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      }
+      const profileInfo = event.target.closest("[data-profile-info]");
+      if (profileInfo) toast(profileInfo.dataset.profileInfo === "privacy" ? "Контакты открываются только по взаимному согласию" : "Мск.Митап подбирает события и людей, с которыми можно пойти");
     });
     document.addEventListener("submit", (event) => {
       if (event.target.matches("#group-chat-form")) void sendGroupMessage(event);
@@ -979,6 +1063,7 @@
     $("#custom-interest").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); addInterest(); } });
     $("#profile-form").addEventListener("submit", saveProfile);
     $("#send-feedback").addEventListener("click", sendFeedback);
+    $("#profile-editor-back").addEventListener("click", () => { state.profileEditorOpen = false; renderProfile(); window.scrollTo({ top: 0, behavior: "smooth" }); });
     $("#feed-filters").addEventListener("click", (event) => {
       const button = event.target.closest("[data-category]"); if (!button) return;
       state.feedCategory = button.dataset.category;

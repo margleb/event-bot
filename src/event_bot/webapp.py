@@ -737,7 +737,8 @@ async def security_headers(request: Request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self' https://telegram.org; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; "
         "connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org"
     )
     if request.url.path.startswith(f"{BASE_PATH}/api"):
