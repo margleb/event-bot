@@ -6,9 +6,9 @@
     <meta name="color-scheme" content="light dark">
     <meta name="theme-color" content="#f5f2eb">
     <title>Афиша для тебя</title>
-    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260829-groups">
+    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260830-event-first">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/r/app/assets/app.js?v=20260829-groups" defer></script>
+    <script src="/r/app/assets/app.js?v=20260830-event-first" defer></script>
   </head>
   <body>
     <div id="loading" class="state-screen">
@@ -30,8 +30,8 @@
     <div id="app" class="app-shell hidden">
       <header class="topbar">
         <div>
-          <p id="header-kicker" class="eyebrow">ВАША АФИША</p>
-          <h1 id="header-title">Куда пойдём?</h1>
+          <p id="header-kicker" class="eyebrow">МСК.Митап · МОСКВА</p>
+          <h1 id="header-title">Афиша Москвы</h1>
         </div>
         <div id="avatar" class="avatar" aria-label="Профиль">М</div>
       </header>
@@ -40,10 +40,19 @@
         <section id="feed-panel" class="panel active" data-panel="feed">
           <div class="intro-card">
             <div>
-              <p>ПОДОБРАНО ПО ВКУСУ</p>
-              <h2>Не просто афиша.<br>Это ваше.</h2>
+              <p>СОБЫТИЯ И НОВЫЕ ЗНАКОМСТВА</p>
+              <h2>Выберите событие.<br>Компанию найдём мы.</h2>
             </div>
             <span class="intro-orbit">✦</span>
+          </div>
+          <p class="feed-lead">Подборка учитывает ваши интересы, удобные дни и бюджет.</p>
+          <div id="feed-filters" class="filter-row event-filters" role="group" aria-label="Категории событий">
+            <button class="filter-chip active" data-category="Все">Все</button>
+            <button class="filter-chip" data-category="Концерты">Концерты</button>
+            <button class="filter-chip" data-category="Выставки">Выставки</button>
+            <button class="filter-chip" data-category="Стендап">Стендап</button>
+            <button class="filter-chip" data-category="Лекции">Лекции</button>
+            <button class="filter-chip" data-category="Прогулки">Прогулки</button>
           </div>
           <div class="section-heading">
             <div>
@@ -71,12 +80,6 @@
         </section>
 
         <section id="group-panel" class="panel" data-panel="group">
-          <div class="section-heading standalone">
-            <div>
-              <p class="eyebrow">ЛЮДИ ПО ИНТЕРЕСАМ</p>
-              <h2>Моя группа</h2>
-            </div>
-          </div>
           <div id="group-content"></div>
         </section>
 
@@ -206,13 +209,6 @@
               <div id="group-chips" class="segment-grid"></div>
             </div>
 
-            <label class="match-card" for="group-matching-input">
-              <input id="group-matching-input" type="checkbox">
-              <span class="match-art" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span class="match-copy"><b>Подобрать компанию</b><small>Добровольно соберём постоянную группу из 3–5 человек с общими интересами</small></span>
-              <span class="match-switch" aria-hidden="true"></span>
-            </label>
-
             <div class="form-section">
               <div class="form-title">
                 <span>05</span>
@@ -247,6 +243,8 @@
               <p id="feedback-status" class="feedback-status hidden"></p>
             </div>
 
+            <button id="admin-profile-button" class="secondary-button admin-entry hidden" type="button" data-tab="admin">Открыть аналитику администратора</button>
+
             <p id="form-error" class="form-error hidden"></p>
             <button id="save-profile" class="primary-button" type="submit">
               <span>Сохранить и подобрать</span><b>→</b>
@@ -258,7 +256,7 @@
       <nav id="bottom-nav" class="bottom-nav" aria-label="Основная навигация">
         <button class="nav-button active" data-tab="feed"><span>✦</span><b>Афиша</b></button>
         <button class="nav-button" data-tab="my"><span>◒</span><b>Мои</b></button>
-        <button class="nav-button" data-tab="group"><span>∴</span><b>Группа</b></button>
+        <button class="nav-button" data-tab="group"><span>∴</span><b>Компания</b></button>
         <button class="nav-button" data-tab="profile"><span>◇</span><b>Профиль</b></button>
         <button id="admin-nav-button" class="nav-button hidden" data-tab="admin"><span>⌁</span><b>Аналитика</b></button>
       </nav>
@@ -278,6 +276,23 @@
           <div id="modal-tags" class="tag-row"></div>
           <a id="modal-source" class="source-link" target="_blank" rel="noopener noreferrer">Подробнее на сайте ↗</a>
           <div id="modal-actions" class="card-actions modal-actions"></div>
+        </div>
+      </article>
+    </div>
+
+    <div id="company-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="company-modal-title">
+      <button id="company-modal-backdrop" class="modal-backdrop" aria-label="Закрыть"></button>
+      <article class="modal-sheet company-sheet">
+        <div class="modal-handle"></div>
+        <button id="company-modal-close" class="modal-close" aria-label="Закрыть">×</button>
+        <div class="company-modal-body">
+          <span class="company-modal-icon">◎</span>
+          <p class="eyebrow">КОМПАНИЯ НА КОНКРЕТНОЕ СОБЫТИЕ</p>
+          <h2 id="company-modal-title">Найти компанию</h2>
+          <div id="company-modal-event" class="company-event-summary"></div>
+          <div class="privacy-note"><span>◉</span><p><b>2–5 человек</b><br>Контакты откроются только после взаимного согласия.</p></div>
+          <button id="company-modal-confirm" class="primary-button" type="button"><span>Начать поиск</span><b>→</b></button>
+          <button id="company-modal-cancel" class="text-button" type="button">Отмена</button>
         </div>
       </article>
     </div>

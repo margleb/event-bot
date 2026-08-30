@@ -332,6 +332,64 @@ button { border: 0; cursor: pointer; }
 .toast { position: fixed; z-index: 80; left: 50%; bottom: calc(88px + var(--safe-bottom)); max-width: calc(100% - 32px); transform: translateX(-50%); padding: 11px 16px; border-radius: 99px; background: var(--ink); color: var(--paper); box-shadow: 0 9px 30px rgb(0 0 0 / .2); font-size: 12px; font-weight: 700; text-align: center; animation: toast-in .2s ease-out; }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
 
+/* Event-first UX: сначала событие, затем компания именно на него. */
+.feed-lead { margin: 14px 5px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.event-filters { margin-top: 15px; margin-bottom: 8px; padding-bottom: 2px; }
+.event-context { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 9px; color: var(--coral); font-size: 9px; font-weight: 900; letter-spacing: .5px; text-transform: uppercase; }
+.event-context span:last-child { max-width: 68%; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.company-signal { display: flex; align-items: center; gap: 8px; min-height: 20px; margin-top: 13px; color: var(--muted); font-size: 10px; }
+.company-signal b { color: var(--ink); }
+.mini-people { color: var(--coral); font-size: 8px; letter-spacing: -2px; }
+.card-actions { grid-template-columns: minmax(0, 1fr) 43px; }
+.company-button { min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 13px; border-radius: 14px; background: var(--ink); color: var(--paper); font-size: 12px; font-weight: 850; }
+.company-button span { font-size: 18px; font-weight: 400; }
+.company-button.joined { background: var(--coral); color: #fff; }
+.save-event { min-height: 44px; border: 1px solid var(--line); border-radius: 14px; background: transparent; font-size: 20px; }
+.save-event.active { border-color: var(--coral); color: var(--coral); }
+.modal-actions { grid-template-columns: minmax(0, 1fr) 48px; }
+.company-sheet { overflow: hidden; }
+.company-sheet .modal-close { background: var(--paper); color: var(--ink); }
+.company-modal-body { padding: 42px 20px calc(24px + var(--safe-bottom)); }
+.company-modal-icon { width: 54px; height: 54px; display: grid; place-items: center; margin-bottom: 20px; border-radius: 18px; background: color-mix(in srgb, var(--coral) 15%, var(--surface)); color: var(--coral); font-size: 31px; }
+.company-modal-body h2 { margin: 6px 0 18px; font-family: Georgia, serif; font-size: 31px; line-height: 1.05; }
+.company-event-summary { display: grid; gap: 5px; padding: 16px; border-radius: 18px; background: var(--paper); }
+.company-event-summary b { font-family: Georgia, serif; font-size: 19px; line-height: 1.12; }
+.company-event-summary span { color: var(--muted); font-size: 11px; }
+.company-event-summary em { margin-top: 4px; color: var(--coral); font-size: 10px; font-style: normal; font-weight: 800; }
+.privacy-note { display: grid; grid-template-columns: 35px 1fr; gap: 10px; align-items: center; margin: 16px 0 20px; padding: 14px; border: 1px solid var(--line); border-radius: 17px; }
+.privacy-note > span { width: 35px; height: 35px; display: grid; place-items: center; border-radius: 12px; background: var(--ink); color: var(--accent); }
+.privacy-note p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.privacy-note b { color: var(--ink); }
+.text-button { width: 100%; min-height: 44px; margin-top: 7px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 750; }
+.text-button.danger { color: #c94f3d; }
+.company-switcher { display: flex; gap: 7px; margin: 0 0 14px; overflow-x: auto; scrollbar-width: none; }
+.company-switcher button { max-width: 220px; flex: 0 0 auto; overflow: hidden; padding: 9px 12px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface); color: var(--muted); font-size: 10px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.company-switcher button.active { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.group-hero { min-height: 225px; padding-top: 62px; }
+.group-hero .source-badge { top: 19px; }
+.group-hero h3 { margin-top: 16px; }
+.group-event-open { margin-top: 17px; padding: 9px 12px; border: 1px solid rgb(255 255 255 / .25); border-radius: 12px; background: rgb(255 255 255 / .1); color: #fff; font-size: 10px; font-weight: 800; }
+.waiting-card { margin-top: 13px; padding: 25px 20px 18px; border: 1px solid var(--line); border-radius: 26px; background: var(--surface); text-align: center; }
+.waiting-orbit { width: 60px; height: 60px; display: grid; place-items: center; margin: 0 auto 17px; border-radius: 50%; background: var(--ink); color: var(--accent); font-size: 32px; animation: waiting-pulse 1.9s ease-in-out infinite; }
+@keyframes waiting-pulse { 50% { transform: scale(1.06); box-shadow: 0 0 0 12px color-mix(in srgb, var(--coral) 12%, transparent); } }
+.waiting-card h3 { margin: 4px 0 7px; font-family: Georgia, serif; font-size: 27px; }
+.waiting-card > p:not(.eyebrow) { margin: 0; color: var(--muted); font-size: 12px; }
+.waiting-card .group-progress { background: var(--paper); }
+.waiting-card .group-progress span { background: var(--coral); }
+.notify-note { margin-top: 18px; padding: 13px; border-radius: 15px; background: var(--paper); color: var(--muted); font-size: 11px; line-height: 1.45; }
+.rsvp-card { display: grid; gap: 13px; margin-top: 13px; padding: 17px; border: 1px solid var(--line); border-radius: 21px; background: var(--surface); }
+.rsvp-card b { font-family: Georgia, serif; font-size: 20px; }
+.rsvp-card > div:last-child { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.rsvp-card button { min-height: 39px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); font-size: 11px; font-weight: 800; }
+.rsvp-card button.active { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.meeting-card { margin-top: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 22px; background: var(--surface); }
+.meeting-card h3 { margin: 3px 0 5px; font-family: Georgia, serif; font-size: 22px; }
+.meeting-card > p:not(.eyebrow) { margin: 0; color: var(--muted); font-size: 10px; }
+.meeting-card form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-top: 14px; }
+.meeting-card input { min-width: 0; min-height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); outline: none; font-size: 11px; }
+.meeting-card button { padding: 0 13px; border-radius: 13px; background: var(--coral); color: #fff; font-size: 10px; font-weight: 800; }
+.admin-entry { display: block; margin-top: 2px; }
+
 @media (min-width: 600px) {
   .panel { padding-inline: 22px; }
   .event-list { grid-template-columns: repeat(2, 1fr); align-items: start; }

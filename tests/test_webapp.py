@@ -363,3 +363,111 @@ def test_group_api_supports_contact_invite_and_chat(
     assert response.status_code == 200
     assert response.json()["group"]["invites"][0]["my_response"] == "going"
     assert db.get_user_intent(users[1], event_id).status == "going"
+
+
+def test_event_first_company_flow_is_scoped_to_one_event(
+    temp_db,
+    monkeypatch,
+    user_factory,
+    event_factory,
+):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.setattr(
+        webapp_module,
+        "_notify_event_company",
+        AsyncMock(return_value=0),
+    )
+    users = [
+        user_factory(
+            user_id=user_id,
+            interests=["Концерты", "Выставки"],
+            username=f"eventmember{user_id}",
+        )[0]
+        for user_id in (42, 43, 44)
+    ]
+    concert_id = event_factory(title="Концерт для компании")
+    exhibition_id = event_factory(title="Выставка для компании")
+
+    with TestClient(app) as client:
+        waiting = client.post(
+            f"/r/api/events/{concert_id}/company",
+            headers=auth_headers(users[0]),
+        )
+        active = client.post(
+            f"/r/api/events/{concert_id}/company",
+            headers=auth_headers(users[1]),
+        )
+        other_event = client.post(
+            f"/r/api/events/{exhibition_id}/company",
+            headers=auth_headers(users[0]),
+        )
+
+        concert_group = active.json()["event_group"]
+        concert_group_id = concert_group["id"]
+        exhibition_group_id = other_event.json()["event_group"]["id"]
+        target = next(member for member in concert_group["members"] if not member["is_me"])
+
+        requested = client.post(
+            f"/r/api/event-groups/{concert_group_id}/connections/{target['member_key']}",
+            headers=auth_headers(users[1]),
+        )
+        recipient_group = client.get(
+            f"/r/api/event-groups/{concert_group_id}",
+            headers=auth_headers(users[0]),
+        ).json()
+        incoming = next(
+            member
+            for member in recipient_group["members"]
+            if member["connection_state"] == "pending_received"
+        )
+        accepted = client.post(
+            f"/r/api/event-groups/{concert_group_id}/connections/{incoming['request_id']}/accept",
+            headers=auth_headers(users[0]),
+        )
+        message = client.post(
+            f"/r/api/event-groups/{concert_group_id}/messages",
+            headers=auth_headers(users[0]),
+            json={"message": "Встречаемся у главного входа"},
+        )
+        meeting = client.put(
+            f"/r/api/event-groups/{concert_group_id}/meeting-point",
+            headers=auth_headers(users[0]),
+            json={"meeting_point": "У главного входа в 18:45"},
+        )
+        rsvp = client.put(
+            f"/r/api/event-groups/{concert_group_id}/rsvp",
+            headers=auth_headers(users[1]),
+            json={"status": "declined"},
+        )
+        outsider_message = client.post(
+            f"/r/api/event-groups/{concert_group_id}/messages",
+            headers=auth_headers(users[2]),
+            json={"message": "Я не в этой компании"},
+        )
+
+    assert waiting.status_code == 200
+    assert waiting.json()["event_group"]["status"] == "forming"
+    assert active.status_code == 200
+    assert concert_group["status"] == "active"
+    assert concert_group["member_count"] == 2
+    assert concert_group["event"]["id"] == concert_id
+    assert exhibition_group_id != concert_group_id
+    assert other_event.json()["event_group"]["event"]["id"] == exhibition_id
+    assert requested.status_code == 200
+    assert accepted.status_code == 200
+    connected = next(
+        member
+        for member in accepted.json()["event_group"]["members"]
+        if not member["is_me"]
+    )
+    assert connected["connection_state"] == "connected"
+    assert connected["contact"]["url"] == "https://t.me/eventmember43"
+    assert message.status_code == 200
+    assert message.json()["event_group"]["messages"][-1]["message"] == "Встречаемся у главного входа"
+    assert meeting.status_code == 200
+    assert meeting.json()["event_group"]["meeting_point"] == "У главного входа в 18:45"
+    assert rsvp.status_code == 200
+    assert next(
+        member for member in rsvp.json()["event_group"]["members"] if member["is_me"]
+    )["rsvp"] == "declined"
+    assert outsider_message.status_code == 409

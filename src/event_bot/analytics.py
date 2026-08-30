@@ -39,7 +39,7 @@ EVENT_LABELS = {
     "miniapp.open": "Открытие Mini App",
     "miniapp.tab.feed": "Вкладка «Афиша»",
     "miniapp.tab.my": "Вкладка «Мои»",
-    "miniapp.tab.group": "Вкладка «Группа»",
+    "miniapp.tab.group": "Вкладка «Компания»",
     "miniapp.tab.profile": "Вкладка «Профиль»",
     "miniapp.tab.admin": "Вкладка «Аналитика»",
     "miniapp.event_details": "Карточка события",
@@ -56,6 +56,15 @@ EVENT_LABELS = {
     "miniapp.group.invite.created": "Группа: предложено мероприятие",
     "miniapp.group.invite.going": "Группа: ответ «Иду»",
     "miniapp.group.invite.declined": "Группа: ответ «Не смогу»",
+    "miniapp.event_company.joined": "Компания на событие: поиск",
+    "miniapp.event_company.left": "Компания на событие: отмена поиска",
+    "miniapp.event_company.rsvp.going": "Компания на событие: «Иду»",
+    "miniapp.event_company.rsvp.declined": "Компания на событие: «Не смогу»",
+    "miniapp.event_company.meeting_point": "Компания на событие: место встречи",
+    "miniapp.event_company.message.sent": "Компания на событие: сообщение",
+    "miniapp.event_company.connection.created": "Компания на событие: запрос знакомства",
+    "miniapp.event_company.connection.accepted": "Компания на событие: знакомство принято",
+    "miniapp.event_company.connection.rejected": "Компания на событие: знакомство отклонено",
     "feedback.submitted": "Отправка обратной связи",
 }
 
@@ -329,13 +338,21 @@ def build_admin_report() -> dict[str, object]:
         ).fetchone()
         groups = conn.execute(
             """
-            SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
-            FROM interest_groups
+            SELECT SUM(total) AS total, SUM(active) AS active
+            FROM (
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
+                FROM interest_groups
+                UNION ALL
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
+                FROM event_groups
+            )
             """
         ).fetchone()
         group_members = conn.execute(
-            "SELECT COUNT(*) AS amount FROM interest_group_members"
+            "SELECT (SELECT COUNT(*) FROM interest_group_members) + "
+            "(SELECT COUNT(*) FROM event_group_members) AS amount"
         ).fetchone()["amount"]
         last_activity = conn.execute(
             "SELECT MAX(created_at) AS value FROM usage_events"
@@ -511,13 +528,21 @@ def build_daily_admin_report(
         ).fetchone()["amount"]
         groups = conn.execute(
             """
-            SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
-            FROM interest_groups
+            SELECT SUM(total) AS total, SUM(active) AS active
+            FROM (
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
+                FROM interest_groups
+                UNION ALL
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
+                FROM event_groups
+            )
             """
         ).fetchone()
         group_members = conn.execute(
-            "SELECT COUNT(*) AS amount FROM interest_group_members"
+            "SELECT (SELECT COUNT(*) FROM interest_group_members) + "
+            "(SELECT COUNT(*) FROM event_group_members) AS amount"
         ).fetchone()["amount"]
 
     started_msk = started_at.astimezone(MOSCOW_TZ)
