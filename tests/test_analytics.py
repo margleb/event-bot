@@ -99,6 +99,6 @@ def test_bot_event_classification_does_not_store_message_text():
         data="intent:going:15",
     )
 
-    assert classify_bot_event(message) == "bot.profile_text"
+    assert classify_bot_event(message) == "bot.text"
     assert classify_bot_event(command) == "command.find"
     assert classify_bot_event(callback) == "callback.intent.going"

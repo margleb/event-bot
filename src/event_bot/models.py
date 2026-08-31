@@ -8,8 +8,7 @@ from pydantic import BaseModel, Field
 def format_group_size(minimum: int | None, maximum: int | None) -> str:
     """«2–4», «от 2», «до 4» или «не указан».
 
-    Живёт здесь, потому что нужен в двух местах: в профиле
-    (profile_service) и в карточке участника (db).
+    Живёт здесь, потому что нужен и в API Mini App, и в карточках участников.
     """
     if minimum is not None and maximum is not None:
         return f"{minimum}–{maximum}"
@@ -20,9 +19,7 @@ def format_group_size(minimum: int | None, maximum: int | None) -> str:
     return "не указан"
 
 
-# Модели Pydantic здесь работают в двух ролях: это и схема ответа
-# для OpenAI (structured output), и обычные объекты для передачи данных.
-# description у полей видит модель — это часть промпта.
+# Модели Pydantic валидируют профиль Mini App и передают данные между слоями.
 class Profile(BaseModel):
     """Профиль пользователя"""
     interests: list[str] = Field(

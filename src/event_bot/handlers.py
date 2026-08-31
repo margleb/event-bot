@@ -1,14 +1,13 @@
 # src/event_bot/handlers.py
-import logging
 import os
-from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
-from openai import OpenAIError
 
 from event_bot.analytics import (
     build_admin_report,
@@ -26,72 +25,52 @@ from event_bot.db import (
     INTENT_STATUS_LABELS,
     PARTICIPATING_STATUSES,
     accept_connection_request,
-    assign_user_to_interest_group,
     block_user,
     create_connection_request,
     find_companions,
-    find_events,
     format_companion_card,
     format_contact_message,
-    format_event_card,
     format_intent_card,
     format_request_notification,
-    get_digest_schedule,
-    get_group_matching_enabled,
-    get_user_interest_group,
     get_user_intent,
-    get_user_intents,
     get_user_profile,
-    get_user_profile_embeddings,
     is_open_participant,
     mark_visibility_asked,
     reject_connection_request,
     save_inactivity_feedback_response,
     save_intent,
-    save_user_profile,
     set_digest_schedule,
     set_intent_visibility,
     update_user_identity,
 )
 from event_bot.digest import DIGEST_WEEKDAY_LABELS
-from event_bot.embedding_provider import (
-    EmbeddingProvider,
-    profile_embedding_text,
-    vector_to_blob,
-)
-from event_bot.group_notifications import notify_group_assignment
 from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
 from event_bot.keyboards import (
     companion_keyboard,
-    digest_weekday_keyboard,
+    feedback_cancel_keyboard,
     intent_card_keyboard,
-    intent_keyboard,
+    main_menu_keyboard,
     miniapp_keyboard,
-    profile_keyboard,
+    miniapp_tab_url,
     request_response_keyboard,
     show_me_keyboard,
     visibility_keyboard,
 )
-from event_bot.models import InterestGroupView, Profile, format_group_size
-from event_bot.profile_service import (
-    ProfileExtractor,
-    build_profile_input,
-    clarification_question,
-    format_profile,
-    next_clarification_field,
-)
-from event_bot.storage import ProfileStore
+from event_bot.models import Profile
 
 
 # Router — контейнер обработчиков, в app.py его подключают к Dispatcher.
 # Порядок регистрации важен: aiogram отдаёт апдейт ПЕРВОМУ обработчику,
 # чей фильтр совпал, поэтому команды объявлены выше перехватчика F.text.
 router = Router()
-logger = logging.getLogger(__name__)
+
+
+class FeedbackFlow(StatesGroup):
+    waiting_message = State()
 
 NO_PROFILE_TEXT = (
-    "Профиля пока нет. Расскажи, что тебе интересно, "
-    "когда удобно ходить и какой бюджет — я его соберу."
+    "Профиля пока нет. Откройте приложение и укажите интересы, "
+    "удобные дни и бюджет."
 )
 
 # Показывается вместо списка тому, кто сам ещё не открылся:
@@ -125,219 +104,126 @@ async def _send_message_safely(
     return True
 
 
-def _load_profile(user_id: int, profile_store: ProfileStore) -> Profile | None:
-    """Профиль из памяти, а если бот перезапускался — из базы."""
-    # ProfileStore живёт в оперативной памяти и обнуляется при рестарте
-    profile = profile_store.confirmed.get(user_id)
-    if profile is not None:
-        return profile
+def _load_profile(user_id: int) -> Profile | None:
+    """Профиль хранится в SQLite и редактируется только через Mini App."""
+    return get_user_profile(user_id)
 
-    # в памяти нет — берём из SQLite
-    profile = get_user_profile(user_id)
-    if profile is not None:
-        # и кладём в память, чтобы следующий раз не ходить в базу
-        profile_store.confirmed[user_id] = profile
-    return profile
+
+def _miniapp_url(tab: str) -> str:
+    url = os.getenv("MINIAPP_URL", "").strip()
+    return miniapp_tab_url(url, tab) if url else ""
+
+
+async def _redirect_to_app(
+    message: Message,
+    tab: str,
+    text: str,
+    button_text: str,
+) -> None:
+    url = _miniapp_url(tab)
+    await message.answer(
+        text,
+        reply_markup=(miniapp_keyboard(url, button_text) if url else None),
+    )
 
 
 # CommandStart() — фильтр, срабатывает только на /start
 @router.message(CommandStart())
-async def start(message: Message) -> None:
+async def start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     miniapp_url = os.getenv("MINIAPP_URL", "").strip()
     await message.answer(
-        "Расскажи свободно, куда ты любишь ходить, "
-        "что тебе интересно, когда обычно удобно, "
-        "какой бюджет и какая компания комфортна.\n\n"
-        "Потом /find — подберу мероприятия, /profile — покажу профиль,\n"
-        "/schedule — настроит еженедельную подборку,\n"
-        "/my — что ты уже отметил, /group — твоя постоянная группа,\n"
-        "/feedback — написать команде бота.",
-        reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
+        "Мск.Митап подбирает мероприятия по вашим интересам и помогает "
+        "найти людей, с которыми можно на них сходить.\n\n"
+        "Выберите, что хотите открыть:",
+        reply_markup=(main_menu_keyboard(miniapp_url) if miniapp_url else None),
     )
 
 
-# profile_store сюда подставляет сам aiogram: он передаёт в обработчик
-# всё, что отдали в start_polling(...) в app.py, сопоставляя по имени аргумента
-@router.message(Command("profile"))
-async def show_profile(
-    message: Message,
-    profile_store: ProfileStore,
-) -> None:
-    # from_user пустой у сообщений из каналов — такие просто игнорируем
-    if message.from_user is None:
-        return
-
-    profile = _load_profile(message.from_user.id, profile_store)
-    if profile is None:
-        await message.answer(NO_PROFILE_TEXT)
-        return
-
-    # кладём профиль в черновики: кнопка «Верно» подтверждает именно черновик
-    profile_store.clear_clarification(message.from_user.id)
-    profile_store.drafts[message.from_user.id] = profile
+@router.message(Command("help"))
+async def show_help(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    miniapp_url = os.getenv("MINIAPP_URL", "").strip()
     await message.answer(
-        format_profile(profile),
-        reply_markup=profile_keyboard(),
+        "В приложении четыре раздела:\n"
+        "• «Афиша» — подборка мероприятий;\n"
+        "• «Мои» — сохранённые события;\n"
+        "• «Компания» — люди, которые собираются вместе;\n"
+        "• «Профиль» — интересы и день еженедельной подборки.\n\n"
+        "Если что-то не работает, нажмите «Написать команде».",
+        reply_markup=(main_menu_keyboard(miniapp_url) if miniapp_url else None),
+    )
+
+
+# Старые команды остаются как переходы, чтобы сохранённые подсказки и ссылки
+# не сломались. В меню Telegram они больше не показываются.
+@router.message(Command("profile"))
+async def show_profile(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _redirect_to_app(
+        message,
+        "profile",
+        "Профиль, предпочтения и расписание подборки теперь находятся в приложении.",
+        "⚙️ Открыть профиль",
     )
 
 
 @router.message(Command("find"))
-async def find(
-    message: Message,
-    profile_store: ProfileStore,
-) -> None:
-    if message.from_user is None:
-        return
-
-    profile = _load_profile(message.from_user.id, profile_store)
-    if profile is None:
-        await message.answer(NO_PROFILE_TEXT)
-        return
-
-    # Векторы живут в SQLite, а не только в памяти, поэтому переживают рестарт.
-    embeddings = get_user_profile_embeddings(message.from_user.id)
-    events = find_events(
-        profile,
-        profile_embedding=embeddings[0],
-        profile_embedding_model=embeddings[1],
-        avoid_embedding=embeddings[2],
-        avoid_embedding_model=embeddings[3],
+async def find(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _redirect_to_app(
+        message,
+        "feed",
+        "Афиша и поиск компании теперь работают в приложении.",
+        "🎟 Открыть афишу",
     )
-    if not events:
-        await message.answer(
-            "Не нашлось подходящих мероприятий. "
-            "Попробуй изменить профиль через /profile."
-        )
-        return
-
-    await message.answer(f"Нашёл {len(events)} вариантов:")
-    # каждое событие — отдельным сообщением, чтобы к нему прицепить свои кнопки
-    for index, event in enumerate(events, start=1):
-        await message.answer(
-            format_event_card(event, index),
-            # HTML нужен из-за тегов <b> в карточке
-            parse_mode=ParseMode.HTML,
-            # кнопки «Интересно / Иду / Не подходит» именно для этого события
-            reply_markup=intent_keyboard(event.id),
-        )
 
 
 @router.message(Command("my"))
-async def my_events(message: Message) -> None:
-    if message.from_user is None:
-        return
-
-    # отметки вместе с данными событий (JOIN в db.get_user_intents)
-    intents = get_user_intents(message.from_user.id)
-    if not intents:
-        await message.answer(
-            "Ты пока ничего не отметил. Напиши /find — покажу мероприятия."
-        )
-        return
-
-    await message.answer("Твои отметки:")
-    for intent in intents:
-        await message.answer(
-            format_intent_card(intent),
-            parse_mode=ParseMode.HTML,
-            # у «Не подходит» переключать и смотреть нечего — кнопок нет
-            reply_markup=(
-                intent_card_keyboard(intent.event.id, intent.visible)
-                if intent.status in PARTICIPATING_STATUSES
-                else None
-            ),
-        )
+async def my_events(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _redirect_to_app(
+        message,
+        "my",
+        "Сохранённые мероприятия находятся в разделе «Мои».",
+        "⭐ Открыть мои мероприятия",
+    )
 
 
 @router.message(Command("schedule"))
-async def show_digest_schedule(message: Message) -> None:
-    """Показывает и меняет день еженедельной персональной подборки."""
-    if message.from_user is None:
-        return
-    if get_user_profile(message.from_user.id) is None:
-        await message.answer(NO_PROFILE_TEXT)
-        return
-
-    weekday = get_digest_schedule(message.from_user.id)
-    if weekday is None:
-        text = "Еженедельная подборка пока выключена. Выбери день отправки:"
-    else:
-        text = (
-            "Сейчас подборка приходит по "
-            f"{DIGEST_WEEKDAY_LABELS[weekday]} после 10:00 по Москве.\n"
-            "Можно выбрать другой день или отключить её:"
-        )
-    await message.answer(text, reply_markup=digest_weekday_keyboard())
-
-
-def _format_interest_group(view: InterestGroupView, user_id: int) -> str:
-    group = view.group
-    if group.status == "active":
-        status_line = "✅ Группа собрана"
-    else:
-        missing = max(0, group.minimum_members - group.member_count)
-        status_line = f"⏳ Набираем группу · осталось участников: {missing}"
-    topics = ", ".join(group.topics) or "новые знакомства"
-    members = []
-    for member in view.members:
-        name = "Вы" if member.user_id == user_id else member.name
-        common = ", ".join(member.common_interests) or "знакомимся"
-        company = format_group_size(member.group_size_min, member.group_size_max)
-        members.append(
-            f"• <b>{escape(name)}</b> · {escape(common)} · компания {escape(company)}"
-        )
-    return (
-        f"<b>{escape(group.title)}</b>\n"
-        f"{status_line}\n"
-        f"Темы: {escape(topics)}\n"
-        f"Участников: {group.member_count}/{group.maximum_members}\n\n"
-        + "\n".join(members)
+async def show_digest_schedule(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _redirect_to_app(
+        message,
+        "profile",
+        "День еженедельной подборки настраивается в профиле приложения.",
+        "⚙️ Настроить рассылку",
     )
 
 
 @router.message(Command("group"))
 async def show_interest_group(
     message: Message,
-    profile_store: ProfileStore,
+    state: FSMContext,
 ) -> None:
-    if message.from_user is None:
-        return
-    user_id = message.from_user.id
-    profile = _load_profile(user_id, profile_store)
-    if profile is None:
-        await message.answer(NO_PROFILE_TEXT)
-        return
-    miniapp_url = os.getenv("MINIAPP_URL", "").strip()
-    if not get_group_matching_enabled(user_id):
-        await message.answer(
-            "Подбор постоянной группы выключен. Открой профиль в приложении "
-            "и включи «Подобрать компанию».",
-            reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
-        )
-        return
-
-    assignment = assign_user_to_interest_group(user_id)
-    await notify_group_assignment(message.bot, assignment)
-    view = get_user_interest_group(user_id, profile)
-    if view is None:
-        await message.answer("Пока не удалось создать группу. Попробуй чуть позже.")
-        return
-    await message.answer(
-        _format_interest_group(view, user_id),
-        parse_mode=ParseMode.HTML,
-        reply_markup=(miniapp_keyboard(miniapp_url) if miniapp_url else None),
+    await state.clear()
+    await _redirect_to_app(
+        message,
+        "group",
+        "Компании теперь собираются вокруг конкретных мероприятий. "
+        "Откройте раздел «Компания», чтобы увидеть свои группы.",
+        "👥 Открыть мои компании",
     )
 
 
 @router.message(Command("feedback"))
-async def start_feedback(message: Message, profile_store: ProfileStore) -> None:
-    """Следующее текстовое сообщение станет обращением к администратору."""
-    if message.from_user is None:
-        return
-    profile_store.awaiting_feedback.add(message.from_user.id)
+async def start_feedback(message: Message, state: FSMContext) -> None:
+    """Явно включает единственный оставшийся диалоговый сценарий бота."""
+    await state.set_state(FeedbackFlow.waiting_message)
     await message.answer(
         "Напишите одним сообщением идею, вопрос или описание проблемы. "
-        "Я передам его команде бота."
+        "Я передам его команде бота.",
+        reply_markup=feedback_cancel_keyboard(),
     )
 
 
@@ -404,164 +290,87 @@ async def reply_to_feedback(message: Message) -> None:
         await message.answer("Не удалось доставить ответ: пользователь недоступен.")
 
 
-# F.text — любое текстовое сообщение, не подошедшее под фильтры выше:
-# считаем, что человек рассказывает о своих предпочтениях
-@router.message(F.text)
-async def handle_profile_text(
-    message: Message,
-    profile_extractor: ProfileExtractor | None,
-    profile_store: ProfileStore,
+@router.callback_query(F.data == "feedback:start")
+async def start_feedback_from_button(
+    callback: CallbackQuery,
+    state: FSMContext,
 ) -> None:
+    await state.set_state(FeedbackFlow.waiting_message)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Напишите одним сообщением идею, вопрос или описание проблемы. "
+            "Я передам его команде бота.",
+            reply_markup=feedback_cancel_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.message(Command("cancel"))
+async def cancel_dialog(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено. Чтобы вернуться в меню, отправьте /start.")
+
+
+@router.callback_query(F.data == "feedback:cancel")
+async def cancel_feedback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("Отправка сообщения отменена.")
+    await callback.answer("Отменено")
+
+
+@router.message(FeedbackFlow.waiting_message, F.text)
+async def receive_feedback(message: Message, state: FSMContext) -> None:
     if message.text is None or message.from_user is None:
         return
-
-    user_id = message.from_user.id
-    if user_id in profile_store.awaiting_feedback:
-        try:
-            item = create_feedback(
-                user_id,
-                message.from_user.first_name,
-                message.from_user.username,
-                message.text,
-                "bot",
-            )
-        except ValueError as error:
-            await message.answer(str(error) + ". Попробуйте ещё раз.")
-            return
-        profile_store.awaiting_feedback.discard(user_id)
-        await notify_admins(message.bot, item)
-        await message.answer(
-            f"Спасибо! Обращение #{item.id} передано команде. "
-            "Ответ придёт сюда, в Telegram."
-        )
-        return
-
-    if profile_extractor is None:
-        await message.answer(
-            "Сервис разбора профиля сейчас недоступен. Попробуй позже."
-        )
-        return
-
-    inputs = profile_store.draft_inputs.setdefault(user_id, [])
-    inputs.append(message.text)
-    answered_field = profile_store.awaiting_clarification.pop(user_id, None)
-
     try:
-        # Полный контекст сохраняет уже названное между уточняющими ответами.
-        profile = await profile_extractor.extract(build_profile_input(inputs))
-    except (OpenAIError, ValueError):
-        inputs.pop()
-        if not inputs:
-            profile_store.draft_inputs.pop(user_id, None)
-        if answered_field is not None:
-            profile_store.awaiting_clarification[user_id] = answered_field
+        item = create_feedback(
+            message.from_user.id,
+            message.from_user.first_name,
+            message.from_user.username,
+            message.text,
+            "bot",
+        )
+    except ValueError as error:
         await message.answer(
-            "Не получилось разобрать предпочтения. Попробуй ещё раз."
+            str(error) + ". Попробуйте ещё раз или нажмите «Отмена».",
+            reply_markup=feedback_cancel_keyboard(),
         )
         return
-
-    if answered_field is not None:
-        profile_store.clarified_fields.setdefault(user_id, set()).add(
-            answered_field
-        )
-
-    # в базу пока не пишем — сначала пользователь должен подтвердить
-    profile_store.drafts[user_id] = profile
-    missing_field = next_clarification_field(
-        profile,
-        profile_store.clarified_fields.get(user_id),
-    )
-    if missing_field is not None:
-        profile_store.awaiting_clarification[user_id] = missing_field
-        await message.answer(clarification_question(missing_field))
-        return
-
-    profile_store.clear_clarification(user_id)
+    await state.clear()
+    await notify_admins(message.bot, item)
     await message.answer(
-        format_profile(profile),
-        reply_markup=profile_keyboard(),
+        f"Спасибо! Обращение #{item.id} передано команде. "
+        "Ответ придёт сюда, в Telegram."
     )
 
 
-# callback_query — нажатие на inline-кнопку; F.data сверяется с её callback_data
+# Обычный текст больше не запускает скрытое заполнение профиля.
+@router.message(F.text)
+async def handle_unknown_text(message: Message) -> None:
+    miniapp_url = os.getenv("MINIAPP_URL", "").strip()
+    await message.answer(
+        "Настройки профиля и подбор событий находятся в приложении. "
+        "Для сообщения команде используйте /feedback.",
+        reply_markup=(main_menu_keyboard(miniapp_url) if miniapp_url else None),
+    )
+
+
+# Кнопки под старыми сообщениями не зависают, а ведут в актуальный профиль.
 @router.callback_query(F.data == "profile_confirm")
-async def confirm_profile(
-    callback: CallbackQuery,
-    profile_store: ProfileStore,
-    embedding_provider: EmbeddingProvider | None,
-) -> None:
-    user_id = callback.from_user.id
-    profile = profile_store.drafts.get(user_id)
-    if profile is None:
-        await callback.answer(
-            "Сначала расскажи о своих предпочтениях.",
-            show_alert=True,
-        )
-        return
-
-    profile_embedding = None
-    avoid_embedding = None
-    embedding_model = None
-    positive_text = profile_embedding_text(profile.interests)
-    negative_text = profile_embedding_text(profile.avoid)
-    if embedding_provider is not None and positive_text:
-        texts = [positive_text]
-        if negative_text:
-            texts.append(negative_text)
-        try:
-            vectors = await embedding_provider.embed(texts)
-            profile_embedding = vector_to_blob(vectors[0])
-            if negative_text:
-                avoid_embedding = vector_to_blob(vectors[1])
-            embedding_model = embedding_provider.model
-        except Exception:
-            # Профиль всё равно сохраняется; /find перейдёт на старые теги.
-            logger.exception("Не удалось посчитать эмбеддинг профиля %s", user_id)
-
-    # Черновик становится подтверждённым профилем и уходит в SQLite.
-    # Имя берём из Telegram: это единственное, что увидят другие участники.
-    profile_store.confirmed[user_id] = profile
-    save_user_profile(
-        user_id,
-        profile,
-        callback.from_user.first_name,
-        callback.from_user.username,
-        profile_embedding=profile_embedding,
-        profile_embedding_model=(embedding_model if profile_embedding else None),
-        avoid_embedding=avoid_embedding,
-        avoid_embedding_model=(embedding_model if avoid_embedding else None),
-    )
-    if get_group_matching_enabled(user_id):
-        assignment = assign_user_to_interest_group(user_id)
-        await notify_group_assignment(callback.bot, assignment)
-
-    # callback.message пустой у очень старых сообщений — отсюда проверка типа
-    if isinstance(callback.message, Message):
-        # убираем кнопки, чтобы нельзя было подтвердить второй раз
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(
-            "Профиль сохранён ✅\nТеперь напиши /find — подберу мероприятия.\n\n"
-            "В какой день присылать персональную подборку каждую неделю? "
-            "Отправка будет после 10:00 по Москве.",
-            reply_markup=digest_weekday_keyboard(),
-        )
-    # обязательный ответ Telegram: без него на кнопке крутятся «часики»
-    await callback.answer()
-
-
 @router.callback_query(F.data == "profile_edit")
-async def edit_profile(
-    callback: CallbackQuery,
-    profile_store: ProfileStore,
-) -> None:
-    # выбрасываем черновик: следующее сообщение соберёт профиль заново
-    profile_store.discard_draft(callback.from_user.id)
+async def redirect_legacy_profile(callback: CallbackQuery) -> None:
+    url = _miniapp_url("profile")
     if isinstance(callback.message, Message):
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
-            "Напиши предпочтения ещё раз — я обновлю профиль."
+            "Профиль теперь редактируется в приложении.",
+            reply_markup=(
+                miniapp_keyboard(url, "⚙️ Открыть профиль") if url else None
+            ),
         )
-    await callback.answer()
+    await callback.answer("Откройте профиль в приложении")
 
 
 @router.callback_query(F.data.startswith("digest:"))
@@ -605,7 +414,7 @@ async def set_weekly_digest(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("inactive_feedback:"))
 async def handle_inactivity_feedback(
     callback: CallbackQuery,
-    profile_store: ProfileStore,
+    state: FSMContext,
 ) -> None:
     """Принимает один короткий ответ; текст просим только для «Другое»."""
     parts = (callback.data or "").split(":", maxsplit=1)
@@ -625,10 +434,11 @@ async def handle_inactivity_feedback(
             "Спасибо, ответ сохранён. Больше напоминать об этом не будем."
         )
         if code == "other":
-            profile_store.awaiting_feedback.add(callback.from_user.id)
+            await state.set_state(FeedbackFlow.waiting_message)
             await callback.message.answer(
                 "Если удобно, напишите одним сообщением, что можно улучшить. "
-                "Я передам его команде."
+                "Я передам его команде.",
+                reply_markup=feedback_cancel_keyboard(),
             )
 
 
@@ -654,7 +464,6 @@ def _parse_event_callback(data: str | None) -> tuple[str, int] | None:
 @router.callback_query(F.data.startswith("intent:"))
 async def set_intent(
     callback: CallbackQuery,
-    profile_store: ProfileStore,
 ) -> None:
     parsed = _parse_event_callback(callback.data)
     # статус сверяем со списком допустимых, чтобы в базу не попал мусор
@@ -667,7 +476,7 @@ async def set_intent(
 
     # Без подтверждённого профиля отметка не сохраняется: иначе человек
     # окажется участником, которого нечем показать другим
-    if _load_profile(user_id, profile_store) is None:
+    if _load_profile(user_id) is None:
         await callback.answer("Сначала заполни профиль.", show_alert=True)
         if isinstance(callback.message, Message):
             await callback.message.answer(NO_PROFILE_TEXT)
@@ -773,7 +582,6 @@ async def toggle_visibility(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("people:"))
 async def show_people(
     callback: CallbackQuery,
-    profile_store: ProfileStore,
 ) -> None:
     parsed = _parse_event_callback(callback.data)
     if parsed is None or parsed[0] != "list":
@@ -783,7 +591,7 @@ async def show_people(
     _, event_id = parsed
     user_id = callback.from_user.id
 
-    profile = _load_profile(user_id, profile_store)
+    profile = _load_profile(user_id)
     if profile is None:
         await callback.answer("Сначала заполни профиль.", show_alert=True)
         return

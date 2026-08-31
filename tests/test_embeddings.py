@@ -14,9 +14,7 @@ from event_bot.embedding_provider import (
     event_embedding_text,
     vector_to_blob,
 )
-from event_bot.handlers import confirm_profile
 from event_bot.models import Event, Profile
-from event_bot.storage import ProfileStore
 
 
 class FakeEmbeddingProvider:
@@ -227,59 +225,6 @@ class EmbeddingDatabaseTests(unittest.IsolatedAsyncioTestCase):
         stored = db.get_user_profile_embeddings(1)
 
         self.assertEqual(stored, (positive, "test-embedding", negative, "test-embedding"))
-
-    async def test_profile_confirmation_batches_and_recomputes_embeddings(
-        self,
-    ) -> None:
-        provider = FakeEmbeddingProvider()
-        store = ProfileStore(
-            drafts={1: Profile(interests=["техно"], avoid=["вязание"])}
-        )
-        callback = SimpleNamespace(
-            from_user=SimpleNamespace(
-                id=1,
-                first_name="Alice",
-                username="alice",
-            ),
-            message=None,
-            answer=AsyncMock(),
-        )
-
-        await confirm_profile(callback, store, provider)
-
-        self.assertEqual(provider.calls, [["техно", "вязание"]])
-        stored = db.get_user_profile_embeddings(1)
-        self.assertTrue(stored[0])
-        self.assertEqual(stored[1], "test-embedding")
-        self.assertTrue(stored[2])
-        self.assertEqual(stored[3], "test-embedding")
-        callback.answer.assert_awaited_once()
-
-        store.drafts[1] = Profile(interests=["джаз"])
-        await confirm_profile(callback, store, provider)
-
-        self.assertEqual(provider.calls, [["техно", "вязание"], ["джаз"]])
-        self.assertEqual(db.get_user_profile(1).interests, ["джаз"])
-
-    async def test_profile_confirmation_without_provider_keeps_tag_fallback(
-        self,
-    ) -> None:
-        store = ProfileStore(drafts={1: Profile(interests=["театр"])})
-        callback = SimpleNamespace(
-            from_user=SimpleNamespace(
-                id=1,
-                first_name="Alice",
-                username=None,
-            ),
-            message=None,
-            answer=AsyncMock(),
-        )
-
-        await confirm_profile(callback, store, None)
-
-        self.assertEqual(db.get_user_profile(1).interests, ["театр"])
-        self.assertEqual(db.get_user_profile_embeddings(1), (None, None, None, None))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,94 +3,67 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from event_bot.handlers import handle_profile_text
-from event_bot.models import Profile
-from event_bot.profile_service import (
-    build_profile_input,
-    next_clarification_field,
+from event_bot.handlers import (
+    FeedbackFlow,
+    handle_unknown_text,
+    receive_feedback,
+    start_feedback,
 )
-from event_bot.storage import ProfileStore
+from event_bot.keyboards import main_menu_keyboard, miniapp_tab_url
 
 
-class SequenceExtractor:
-    def __init__(self, profiles: list[Profile]) -> None:
-        self.profiles = iter(profiles)
-        self.inputs: list[str] = []
+def test_miniapp_tab_url_preserves_build_and_replaces_tab():
+    url = "https://bot.example/r/app?build=42&tab=feed"
 
-    async def extract(self, text: str) -> Profile:
-        self.inputs.append(text)
-        return next(self.profiles)
-
-
-def test_missing_profile_fields_are_requested_in_useful_order():
-    assert next_clarification_field(Profile()) == "interests"
-    assert next_clarification_field(Profile(interests=["театр"])) == "days"
-    assert (
-        next_clarification_field(
-            Profile(interests=["театр"]),
-            {"days"},
-        )
-        == "budget"
-    )
-    assert (
-        next_clarification_field(
-            Profile(interests=["театр"]),
-            {"days", "budget"},
-        )
-        == "group_size"
-    )
-    assert (
-        next_clarification_field(
-            Profile(interests=["театр"]),
-            {"days", "budget", "group_size"},
-        )
-        is None
+    assert miniapp_tab_url(url, "group") == (
+        "https://bot.example/r/app?build=42&tab=group"
     )
 
 
-def test_profile_input_keeps_all_follow_up_answers():
-    text = build_profile_input(["Люблю джаз", "По пятницам", "До 2000 рублей"])
+def test_main_menu_opens_each_current_miniapp_section():
+    keyboard = main_menu_keyboard("https://bot.example/r/app?build=42")
 
-    assert "Сообщение пользователя 1: Люблю джаз" in text
-    assert "Сообщение пользователя 2: По пятницам" in text
-    assert "Сообщение пользователя 3: До 2000 рублей" in text
+    assert keyboard.inline_keyboard[0][0].web_app.url.endswith("build=42&tab=feed")
+    assert keyboard.inline_keyboard[1][0].web_app.url.endswith("build=42&tab=my")
+    assert keyboard.inline_keyboard[1][1].web_app.url.endswith("build=42&tab=group")
+    assert keyboard.inline_keyboard[2][0].web_app.url.endswith("build=42&tab=profile")
+    assert keyboard.inline_keyboard[3][0].callback_data == "feedback:start"
 
 
 @pytest.mark.asyncio
-async def test_handler_clarifies_nullable_preferences_without_losing_context():
-    extractor = SequenceExtractor(
-        [
-            Profile(interests=["джаз"]),
-            Profile(interests=["джаз"]),
-            Profile(interests=["джаз"]),
-            Profile(interests=["джаз"]),
-        ]
-    )
-    store = ProfileStore()
+async def test_unknown_text_redirects_to_app_instead_of_building_profile(monkeypatch):
+    monkeypatch.setenv("MINIAPP_URL", "https://bot.example/r/app?build=42")
+    message = SimpleNamespace(answer=AsyncMock())
+
+    await handle_unknown_text(message)
+
+    message.answer.assert_awaited_once()
+    assert "находятся в приложении" in message.answer.await_args.args[0]
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+@pytest.mark.asyncio
+async def test_feedback_is_an_explicit_cancellable_state(temp_db, monkeypatch):
+    monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "")
+    state = SimpleNamespace(set_state=AsyncMock(), clear=AsyncMock())
     message = SimpleNamespace(
-        text="Люблю джаз",
-        from_user=SimpleNamespace(id=7),
+        text="Добавьте фильтр по району",
+        from_user=SimpleNamespace(id=7, first_name="Мария", username="maria"),
+        bot=SimpleNamespace(),
         answer=AsyncMock(),
     )
 
-    await handle_profile_text(message, extractor, store)
-    assert store.awaiting_clarification[7] == "days"
+    await start_feedback(message, state)
+    state.set_state.assert_awaited_once_with(FeedbackFlow.waiting_message)
+    assert (
+        message.answer.await_args.kwargs["reply_markup"]
+        .inline_keyboard[0][0]
+        .callback_data
+        == "feedback:cancel"
+    )
 
-    message.text = "Любой день"
-    await handle_profile_text(message, extractor, store)
-    assert store.awaiting_clarification[7] == "budget"
+    message.answer.reset_mock()
+    await receive_feedback(message, state)
 
-    message.text = "Любой бюджет"
-    await handle_profile_text(message, extractor, store)
-    assert store.awaiting_clarification[7] == "group_size"
-
-    message.text = "Без разницы"
-    await handle_profile_text(message, extractor, store)
-
-    assert "Люблю джаз" in extractor.inputs[-1]
-    assert "Любой день" in extractor.inputs[-1]
-    assert "Любой бюджет" in extractor.inputs[-1]
-    assert "Без разницы" in extractor.inputs[-1]
-    assert 7 not in store.awaiting_clarification
-    assert 7 not in store.draft_inputs
-    assert message.answer.await_args_list[-1].kwargs["reply_markup"] is not None
+    state.clear.assert_awaited_once()
+    assert "передано команде" in message.answer.await_args.args[0]

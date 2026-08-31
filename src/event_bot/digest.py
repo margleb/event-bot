@@ -16,7 +16,7 @@ from event_bot.db import (
     get_user_profile_embeddings,
     mark_digest_sent,
 )
-from event_bot.keyboards import intent_keyboard
+from event_bot.keyboards import miniapp_keyboard, miniapp_tab_url
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -69,23 +69,39 @@ async def dispatch_due_digests(
             avoid_embedding_model=embeddings[3],
         )
         try:
+            miniapp_url = os.getenv("MINIAPP_URL", "").strip()
             if not events:
+                profile_url = (
+                    miniapp_tab_url(miniapp_url, "profile") if miniapp_url else ""
+                )
                 await bot.send_message(
                     user_id,
                     "На этой неделе подходящих мероприятий не нашлось. "
-                    "Профиль можно изменить командой /profile.",
+                    "Попробуйте обновить интересы в профиле.",
+                    reply_markup=(
+                        miniapp_keyboard(profile_url, "⚙️ Открыть профиль")
+                        if profile_url
+                        else None
+                    ),
                 )
             else:
+                feed_url = (
+                    miniapp_tab_url(miniapp_url, "feed") if miniapp_url else ""
+                )
                 await bot.send_message(
                     user_id,
                     "Твоя еженедельная подборка — выбрал лучшее по профилю 👇",
+                    reply_markup=(
+                        miniapp_keyboard(feed_url, "🎟 Открыть подборку")
+                        if feed_url
+                        else None
+                    ),
                 )
                 for index, event in enumerate(events, start=1):
                     await bot.send_message(
                         user_id,
                         format_event_card(event, index),
                         parse_mode=ParseMode.HTML,
-                        reply_markup=intent_keyboard(event.id),
                     )
         except TelegramAPIError:
             # Заблокированный бот не должен получать новую попытку каждую минуту.

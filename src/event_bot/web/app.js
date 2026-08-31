@@ -1158,7 +1158,8 @@
       configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
       $("#loading").classList.add("hidden");
       $("#app").classList.remove("hidden");
-      setTab("feed");
+      const requestedTab = new URLSearchParams(window.location.search).get("tab");
+      setTab(new Set(["feed", "my", "group", "profile"]).has(requestedTab) ? requestedTab : "feed");
       return;
     }
     if (!tg?.initData) {
@@ -1172,7 +1173,12 @@
       $("#loading").classList.add("hidden");
       $("#app").classList.remove("hidden");
       const requestedTab = new URLSearchParams(window.location.search).get("tab");
-      setTab(state.data.profile ? (requestedTab === "group" ? "group" : "feed") : "profile");
+      const publicTabs = new Set(["feed", "my", "group", "profile"]);
+      setTab(
+        state.data.profile && publicTabs.has(requestedTab)
+          ? requestedTab
+          : (state.data.profile ? "feed" : "profile"),
+      );
     } catch (error) {
       $("#loading").classList.add("hidden");
       $("#launch-screen").classList.remove("hidden");

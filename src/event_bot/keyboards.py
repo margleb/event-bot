@@ -1,18 +1,9 @@
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
 # Inline-клавиатуры — кнопки под сообщением. У каждой кнопки есть
 # callback_data: эту строку Telegram присылает обратно при нажатии,
 # по ней в handlers.py находится нужный обработчик.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-
-
-DIGEST_WEEKDAY_BUTTONS = (
-    ("Пн", 0),
-    ("Вт", 1),
-    ("Ср", 2),
-    ("Чт", 3),
-    ("Пт", 4),
-    ("Сб", 5),
-    ("Вс", 6),
-)
 
 
 def miniapp_keyboard(
@@ -32,44 +23,60 @@ def miniapp_keyboard(
     )
 
 
-def profile_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки под распознанным профилем."""
-    # список списков = строки кнопок; тут одна строка из двух кнопок
+def miniapp_tab_url(url: str, tab: str) -> str:
+    """Добавляет вкладку к URL, сохраняя build-параметр для сброса кеша."""
+    parts = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(parts.query) if key != "tab"]
+    query.append(("tab", tab))
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def main_menu_keyboard(url: str) -> InlineKeyboardMarkup:
+    """Единое меню бота: работа с сервисом происходит в Mini App."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Верно",
-                    callback_data="profile_confirm",
+                    text="🎟 Открыть афишу",
+                    web_app=WebAppInfo(url=miniapp_tab_url(url, "feed")),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⭐ Мои",
+                    web_app=WebAppInfo(url=miniapp_tab_url(url, "my")),
                 ),
                 InlineKeyboardButton(
-                    text="✏️ Исправить",
-                    callback_data="profile_edit",
+                    text="👥 Компании",
+                    web_app=WebAppInfo(url=miniapp_tab_url(url, "group")),
                 ),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Профиль и рассылка",
+                    web_app=WebAppInfo(url=miniapp_tab_url(url, "profile")),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 Написать команде",
+                    callback_data="feedback:start",
+                )
+            ],
         ]
     )
 
 
-def digest_weekday_keyboard() -> InlineKeyboardMarkup:
-    """День еженедельной персональной подборки и отключение рассылки."""
-    buttons = [
-        InlineKeyboardButton(
-            text=label,
-            callback_data=f"digest:set:{weekday}",
-        )
-        for label, weekday in DIGEST_WEEKDAY_BUTTONS
-    ]
+def feedback_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Явный выход из режима отправки обратной связи."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            buttons[:4],
-            buttons[4:],
             [
                 InlineKeyboardButton(
-                    text="🔕 Не присылать",
-                    callback_data="digest:off",
+                    text="Отмена",
+                    callback_data="feedback:cancel",
                 )
-            ],
+            ]
         ]
     )
 
@@ -100,34 +107,6 @@ def inactivity_feedback_keyboard() -> InlineKeyboardMarkup:
                     callback_data="inactive_feedback:other",
                 ),
             ],
-        ]
-    )
-
-
-def intent_keyboard(event_id: int) -> InlineKeyboardMarkup:
-    """Кнопки отметки под карточкой события.
-
-    id события подставляется прямо в callback_data — иначе при
-    нажатии будет непонятно, о каком из пяти событий речь.
-    """
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🤔 Интересно",
-                    callback_data=f"intent:interested:{event_id}",
-                ),
-                InlineKeyboardButton(
-                    text="🙋 Иду",
-                    callback_data=f"intent:going:{event_id}",
-                ),
-                InlineKeyboardButton(
-                    text="🚫 Не подходит",
-                    callback_data=f"intent:not_going:{event_id}",
-                ),
-            ],
-            # вторая строка клавиатуры
-            [people_button(event_id)],
         ]
     )
 

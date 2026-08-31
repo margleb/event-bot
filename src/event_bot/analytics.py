@@ -25,7 +25,7 @@ EVENT_LABELS = {
     "command.my": "Мои мероприятия",
     "command.group": "Группа",
     "command.feedback": "Обратная связь",
-    "bot.profile_text": "Заполнение профиля",
+    "bot.text": "Текстовое сообщение боту",
     "callback.profile_confirm": "Подтверждение профиля",
     "callback.profile_edit": "Редактирование профиля",
     "callback.digest": "Настройка подборки",
@@ -124,7 +124,7 @@ def classify_bot_event(event: TelegramObject) -> str | None:
             command = text.split(maxsplit=1)[0][1:].split("@", maxsplit=1)[0]
             command = re.sub(r"[^a-z0-9_]", "", command.lower())
             return f"command.{command}" if command else None
-        return "bot.profile_text" if text else None
+        return "bot.text" if text else None
     if isinstance(event, CallbackQuery):
         parts = (event.data or "").split(":")
         if not parts or not parts[0]:

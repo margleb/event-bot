@@ -11,23 +11,18 @@ from aiogram.types import (
     WebAppInfo,
 )
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 
 from event_bot.admin_digest import run_admin_report_scheduler
 from event_bot.db import init_db
 from event_bot.analytics import UsageTrackingMiddleware, get_admin_ids
 from event_bot.digest import run_digest_scheduler
-from event_bot.embedding_provider import EmbeddingProvider
 from event_bot.handlers import router
 from event_bot.inactivity_feedback import run_inactivity_feedback_scheduler
-from event_bot.profile_service import ProfileExtractor
-from event_bot.storage import ProfileStore
 
 
 async def run() -> None:
     """Собирает бота и запускает приём сообщений."""
-    # Читает .env и кладёт BOT_TOKEN / OPENAI_API_KEY в окружение.
-    # Без OpenAI-ключа бот всё равно стартует с tag fallback для /find.
+    # Читает .env и кладёт настройки бота в окружение.
     load_dotenv()
 
     # Схема создаётся и мигрирует при каждом старте. События загружаются
@@ -42,11 +37,7 @@ async def run() -> None:
     miniapp_url = os.getenv("MINIAPP_URL", "").strip()
     user_commands = [
         BotCommand(command="start", description="Главное меню"),
-        BotCommand(command="find", description="Подобрать мероприятия"),
-        BotCommand(command="profile", description="Мои предпочтения"),
-        BotCommand(command="schedule", description="Настроить подборку"),
-        BotCommand(command="my", description="Мои мероприятия"),
-        BotCommand(command="group", description="Моя группа"),
+        BotCommand(command="help", description="Как пользоваться"),
         BotCommand(command="feedback", description="Написать команде"),
     ]
     await bot.set_my_commands(user_commands)
@@ -68,16 +59,6 @@ async def run() -> None:
                 web_app=WebAppInfo(url=miniapp_url),
             )
         )
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    openai_client = (
-        AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
-    )
-    profile_extractor = (
-        ProfileExtractor(openai_client) if openai_client is not None else None
-    )
-    embedding_provider = (
-        EmbeddingProvider(openai_client) if openai_client is not None else None
-    )
     # Dispatcher принимает апдейты от Telegram и раздаёт их роутерам
     dispatcher = Dispatcher()
     router.message.outer_middleware(UsageTrackingMiddleware())
@@ -91,14 +72,7 @@ async def run() -> None:
 
     try:
         # polling — бот сам опрашивает Telegram о новых сообщениях.
-        # Именованные аргументы попадают в обработчики: у кого в
-        # сигнатуре есть profile_store, тот получит этот объект
-        await dispatcher.start_polling(
-            bot,
-            profile_extractor=profile_extractor,
-            embedding_provider=embedding_provider,
-            profile_store=ProfileStore(),
-        )
+        await dispatcher.start_polling(bot)
     # закрываем соединения, даже если polling упал с ошибкой
     finally:
         for task in background_tasks:
@@ -106,8 +80,6 @@ async def run() -> None:
         for task in background_tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        if openai_client is not None:
-            await openai_client.close()
         await bot.session.close()
 
 
