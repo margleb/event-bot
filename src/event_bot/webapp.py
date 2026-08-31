@@ -40,6 +40,7 @@ from event_bot.db import (
     create_group_event_invite,
     create_group_message,
     find_events,
+    find_events_with_open_companies,
     get_digest_schedule,
     get_event,
     get_event_company_counts,
@@ -649,10 +650,14 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
         group["event"]["id"]: group
         for group in event_groups
     }
+    company_discovery = (
+        find_events_with_open_companies(limit=12) if profile is not None else []
+    )
     event_ids = list(
         {
             *[event.id for event in recommendations if event.id is not None],
             *[intent.event.id for intent in intents if intent.event.id is not None],
+            *[event.id for event in company_discovery if event.id is not None],
         }
     )
     company_counts = get_event_company_counts(event_ids)
@@ -683,6 +688,10 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
         "events": [
             event_payload(event, intents_by_event.get(event.id))
             for event in recommendations
+        ],
+        "company_events": [
+            event_payload(event, intents_by_event.get(event.id))
+            for event in company_discovery
         ],
         "my_events": [event_payload(intent.event, intent) for intent in intents],
     }

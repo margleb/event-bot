@@ -67,6 +67,7 @@
       { id: 2, author_name: "Вы", is_me: true, message: "Да, буду за 15 минут", created_at: "2026-08-29 12:38:00" },
     ],
   }];
+  LOCAL_PREVIEW.company_events = LOCAL_PREVIEW.events.filter((event) => event.company_count > 0);
 
   function localAdminPreview(days) {
     const today = new Date();
@@ -280,6 +281,26 @@
       </button>`;
   }
 
+  function companyDiscoveryCard(event) {
+    const count = Number(event.company_count || 0);
+    const singular = count % 10 === 1 && count % 100 !== 11;
+    const few = [2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100);
+    const people = `${count} ${singular ? "человек ищет" : few ? "человека ищут" : "человек ищут"} компанию`;
+    return `
+      <article class="company-discovery-card">
+        <button class="discovery-image" type="button" data-open="${event.id}" style="background-image:url('${escapeHtml(eventImage(event))}')" aria-label="Подробнее о мероприятии">
+          <span class="image-shade"></span>${sourceBadge(event)}
+          <strong><i>● ●</i>${escapeHtml(people)}</strong>
+        </button>
+        <div class="discovery-copy">
+          <button type="button" data-open="${event.id}">${escapeHtml(event.title)}</button>
+          <span>◷ ${escapeHtml(formatWhen(event.date, true))}</span>
+          <span>⌖ ${escapeHtml(event.venue || event.address || "Москва")}</span>
+          <div>${companyAction(event)}<b>${escapeHtml(event.price)}</b></div>
+        </div>
+      </article>`;
+  }
+
   function emptyState(kind) {
     if (kind === "feed") return `<div class="empty-state"><span>⌁</span><h3>Пока ничего точного</h3><p>Попробуйте выбрать другие дни или увеличить бюджет в профиле.</p></div>`;
     return `<div class="empty-state"><span>◒</span><h3>Планы ещё впереди</h3><p>Отмечайте интересные события в афише — они появятся здесь.</p></div>`;
@@ -293,7 +314,14 @@
   }
 
   function renderFeed() {
-    const events = (state.data.events || []).filter((event) => state.feedCategory === "Все" || categoryFor(event) === state.feedCategory);
+    const companyEvents = (state.data.company_events || []).filter((event) => Number(event.company_count || 0) > 0);
+    const companyIds = new Set(companyEvents.map((event) => event.id));
+    const events = (state.data.events || []).filter((event) => (
+      !companyIds.has(event.id)
+      && (state.feedCategory === "Все" || categoryFor(event) === state.feedCategory)
+    ));
+    $("#company-discovery").classList.toggle("hidden", !companyEvents.length);
+    $("#company-event-list").innerHTML = companyEvents.map((event) => companyDiscoveryCard(event)).join("");
     $("#company-nav-dot").classList.toggle("hidden", !(state.data.event_groups || []).some((group) => group.status !== "active"));
     $("#event-count").textContent = events.length;
     $("#event-list").innerHTML = events.length ? events.map((event) => eventCard(event)).join("") : emptyState("feed");
@@ -674,12 +702,25 @@
   }
 
   function mergeEvent(updated) {
-    for (const collection of [state.data.events, state.data.my_events]) {
+    state.data.company_events ||= [];
+    for (const collection of [state.data.events, state.data.my_events, state.data.company_events]) {
       const index = collection.findIndex((event) => event.id === updated.id);
-      if (index >= 0) collection[index] = { ...collection[index], ...updated };
+      if (index >= 0) {
+        const existing = collection[index];
+        collection[index] = {
+          ...existing,
+          ...updated,
+          company_count: Math.max(Number(existing.company_count || 0), Number(updated.company_count || 0)),
+          company_group_id: updated.company_group_id ?? existing.company_group_id,
+          company_status: updated.company_status ?? existing.company_status,
+        };
+      }
     }
     const myIndex = state.data.my_events.findIndex((event) => event.id === updated.id);
     if (myIndex < 0) state.data.my_events.push(updated);
+    if (Number(updated.company_count || 0) > 0 && !state.data.company_events.some((event) => event.id === updated.id)) {
+      state.data.company_events.unshift(updated);
+    }
   }
 
   let toastTimer;
@@ -785,12 +826,13 @@
     try {
       await api(`/event-groups/${groupId}`, { method: "DELETE" });
       state.data.event_groups = (state.data.event_groups || []).filter((item) => item.id !== groupId);
-      for (const event of [...state.data.events, ...state.data.my_events]) {
+      for (const event of [...state.data.events, ...state.data.my_events, ...(state.data.company_events || [])]) {
         if (event.company_group_id === groupId) {
           event.company_group_id = null; event.company_status = null;
           event.company_count = Math.max(0, Number(event.company_count || 1) - 1);
         }
       }
+      state.data.company_events = (state.data.company_events || []).filter((event) => Number(event.company_count || 0) > 0);
       state.selectedEventGroupId = state.data.event_groups[0]?.id || null;
       if (!state.data.event_groups.length) state.groupDetailOpen = false;
       renderFeed(); renderMy(); renderGroup();
@@ -861,7 +903,7 @@
 
   function findEvent(id) {
     const groupEvents = (state.data.event_groups || []).map((group) => group.event);
-    return [...(state.data.events || []), ...(state.data.my_events || []), ...groupEvents].find((event) => event.id === Number(id));
+    return [...(state.data.events || []), ...(state.data.company_events || []), ...(state.data.my_events || []), ...groupEvents].find((event) => event.id === Number(id));
   }
 
   function openModal(id) {

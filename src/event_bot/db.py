@@ -2002,6 +2002,42 @@ EVENT_GROUP_MIN_MEMBERS = 2
 EVENT_GROUP_MAX_MEMBERS = 5
 
 
+def find_events_with_open_companies(*, limit: int = 12) -> list[Event]:
+    """Будущие события, где хотя бы одна компания ещё принимает участников."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT e.*
+            FROM events e
+            JOIN (
+                SELECT open_groups.event_id, MAX(open_groups.created_at) AS newest_group
+                FROM (
+                    SELECT eg.id, eg.event_id, eg.created_at
+                    FROM event_groups eg
+                    JOIN event_group_members gm ON gm.group_id = eg.id
+                    WHERE eg.status IN ('forming', 'active')
+                    GROUP BY eg.id
+                    HAVING COUNT(gm.user_id) < ?
+                ) AS open_groups
+                GROUP BY open_groups.event_id
+            ) AS discovery ON discovery.event_id = e.id
+            WHERE e.city = 'Москва'
+              AND COALESCE(e.status, 'active') = 'active'
+              AND COALESCE(e.end_date, e.date) > datetime('now', 'localtime')
+            ORDER BY discovery.newest_group DESC, e.date, e.id
+            LIMIT ?
+            """,
+            (EVENT_GROUP_MAX_MEMBERS, max(1, min(limit, 50))),
+        ).fetchall()
+    events: list[Event] = []
+    for row in rows:
+        try:
+            events.append(_row_to_event(row))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.exception("Пропущено поврежденное событие с открытой компанией")
+    return events
+
+
 def join_event_group(
     user_id: int,
     event_id: int,

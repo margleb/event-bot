@@ -393,6 +393,10 @@ def test_event_first_company_flow_is_scoped_to_one_event(
             f"/r/api/events/{concert_id}/company",
             headers=auth_headers(users[0]),
         )
+        discovery = client.get(
+            "/r/api/bootstrap",
+            headers=auth_headers(users[2]),
+        )
         active = client.post(
             f"/r/api/events/{concert_id}/company",
             headers=auth_headers(users[1]),
@@ -447,6 +451,14 @@ def test_event_first_company_flow_is_scoped_to_one_event(
 
     assert waiting.status_code == 200
     assert waiting.json()["event_group"]["status"] == "forming"
+    assert discovery.status_code == 200
+    discovered = next(
+        event
+        for event in discovery.json()["company_events"]
+        if event["id"] == concert_id
+    )
+    assert discovered["company_count"] == 1
+    assert discovered["company_group_id"] is None
     assert active.status_code == 200
     assert concert_group["status"] == "active"
     assert concert_group["member_count"] == 2

@@ -9,9 +9,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260830-figma-v2">
+    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260831-company-discovery">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/r/app/assets/app.js?v=20260830-figma-v2" defer></script>
+    <script src="/r/app/assets/app.js?v=20260831-company-discovery" defer></script>
   </head>
   <body>
     <div id="loading" class="state-screen">
@@ -54,8 +54,21 @@
             <button class="filter-chip" data-category="Лекции">Лекции</button>
             <button class="filter-chip" data-category="Прогулки">Прогулки</button>
           </div>
-          <span id="event-count" class="count-badge hidden">0</span>
-          <div id="event-list" class="event-list"></div>
+          <section id="company-discovery" class="company-discovery hidden">
+            <div class="feed-section-title">
+              <div><span class="live-dot"></span><h2>Уже ищут компанию</h2></div>
+              <p>Присоединяйтесь к активным сборам</p>
+            </div>
+            <div id="company-event-list" class="company-event-list"></div>
+          </section>
+          <section id="recommendations-section">
+            <div class="feed-section-title recommendations-title">
+              <div><h2>Для вас</h2></div>
+              <p>По интересам, дням и бюджету</p>
+            </div>
+            <span id="event-count" class="count-badge hidden">0</span>
+            <div id="event-list" class="event-list"></div>
+          </section>
         </section>
 
         <section id="my-panel" class="panel" data-panel="my">

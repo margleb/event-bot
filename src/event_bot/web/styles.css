@@ -79,6 +79,28 @@ button { border: 0; cursor: pointer; }
 .filter-chip.active { background: var(--ink); color: #fff; font-weight: 600; }
 .event-list { display: flex; flex-direction: column; gap: 16px; }
 
+.company-discovery { margin: 4px -16px 24px; padding: 17px 0 18px; background: var(--ink); color: #fff; }
+.feed-section-title { padding: 0 16px 12px; }
+.feed-section-title > div { display: flex; align-items: center; gap: 8px; }
+.feed-section-title h2 { margin: 0; font: 22px/1.15 "DM Serif Display", serif; }
+.feed-section-title p { margin: 4px 0 0; color: rgb(255 255 255 / .62); font-size: 12px; }
+.live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); box-shadow: 0 0 0 4px rgb(255 92 62 / .2); animation: live-pulse 1.8s ease-in-out infinite; }
+@keyframes live-pulse { 50% { box-shadow: 0 0 0 7px rgb(255 92 62 / .08); } }
+.company-event-list { display: flex; gap: 12px; overflow-x: auto; padding: 0 16px 3px; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.company-event-list::-webkit-scrollbar { display: none; }
+.company-discovery-card { width: min(84vw, 342px); flex: 0 0 auto; overflow: hidden; border-radius: 18px; background: var(--surface); color: var(--ink); scroll-snap-align: start; box-shadow: 0 5px 20px rgb(0 0 0 / .18); }
+.discovery-image { position: relative; display: block; width: 100%; height: 116px; padding: 0; background-position: center; background-size: cover; }
+.discovery-image strong { position: absolute; z-index: 2; right: 10px; bottom: 9px; left: 10px; display: flex; align-items: center; gap: 7px; color: #fff; font-size: 11px; font-weight: 600; }
+.discovery-image strong i { color: var(--coral); font-size: 8px; font-style: normal; letter-spacing: -2px; }
+.discovery-copy { display: flex; flex-direction: column; gap: 5px; padding: 12px; }
+.discovery-copy > button { padding: 0; overflow: hidden; background: transparent; font: 17px/1.18 "DM Serif Display", serif; text-align: left; }
+.discovery-copy > span { overflow: hidden; color: var(--body); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.discovery-copy > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-top: 6px; }
+.discovery-copy .company-button { min-height: 40px; padding: 8px 10px; font-size: 12px; box-shadow: none; }
+.discovery-copy > div > b { min-height: 40px; display: flex; align-items: center; padding: 0 10px; border-radius: 10px; background: var(--surface-soft); font-size: 11px; white-space: nowrap; }
+.recommendations-title { padding: 0 0 12px; }
+.recommendations-title p { color: var(--muted); }
+
 .event-card { overflow: hidden; border-radius: 20px; background: var(--surface); box-shadow: 0 1px 6px rgb(26 22 20 / .08); }
 .card-visual { position: relative; display: block; width: 100%; height: 160px; padding: 0; overflow: hidden; background-color: #c9c4bc; background-position: center; background-size: cover; text-align: left; }
 .image-shade { position: absolute; inset: 0; background: linear-gradient(to top, rgb(26 22 20 / .55) 0%, transparent 55%); }
