@@ -42,8 +42,6 @@
       preferred_group_size_min: 2, preferred_group_size_max: 5,
     },
     digest_weekday: 4,
-    group_matching_enabled: false,
-    group: null,
     event_groups: [],
     events: [
       { id: 101, title: "Джаз на крыше: вечерний концерт", description: "Живая музыка, закат над Москвой и камерная атмосфера. В программе — современный джаз и авторские аранжировки.", city: "Москва", address: "Берсеневская набережная, 6", date: "2026-09-04T19:30:00", end_date: null, price: "от 1 800 ₽", tags: ["джаз", "концерт", "на крыше"], venue: "Красный Октябрь", source_url: "https://kudago.com/", source_id: "kudago", source_name: "KudaGo", source_mark: "K", intent: "going", visible: true, company_count: 3, company_group_id: 12, company_status: "active" },
@@ -975,7 +973,6 @@
           days: [...state.selectedDays], budget_rub: budget,
           preferred_group_size_min: state.group[0], preferred_group_size_max: state.group[1],
           digest_weekday: digest === "" ? null : Number(digest),
-          group_matching_enabled: false,
         }),
       });
       configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderGroup();

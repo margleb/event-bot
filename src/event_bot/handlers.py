@@ -202,7 +202,7 @@ async def show_digest_schedule(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("group"))
-async def show_interest_group(
+async def show_event_companies(
     message: Message,
     state: FSMContext,
 ) -> None:
