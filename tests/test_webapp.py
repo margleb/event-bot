@@ -90,6 +90,15 @@ def test_api_rejects_request_without_telegram_signature(temp_db, monkeypatch):
     assert response.status_code == 401
 
 
+def test_miniapp_html_is_never_cached(temp_db):
+    with TestClient(app) as client:
+        response = client.get("/r/app?build=test")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
+
+
 def test_profile_bootstrap_and_schedule(temp_db, monkeypatch):
     monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

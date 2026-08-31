@@ -752,6 +752,10 @@ async def security_headers(request: Request, call_next):
     )
     if request.url.path.startswith(f"{BASE_PATH}/api"):
         response.headers["Cache-Control"] = "no-store"
+    elif request.url.path.rstrip("/") == f"{BASE_PATH}/app":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
@@ -765,7 +769,12 @@ async def _notify_event_company(
     bot = Bot(token=os.environ["BOT_TOKEN"])
     delivered = 0
     miniapp_url = os.getenv("MINIAPP_URL", "").strip()
-    suffix = f"\n\nОткрыть компанию: {miniapp_url}?tab=group" if miniapp_url else ""
+    separator = "&" if "?" in miniapp_url else "?"
+    suffix = (
+        f"\n\nОткрыть компанию: {miniapp_url}{separator}tab=group"
+        if miniapp_url
+        else ""
+    )
     try:
         for member_id in user_ids:
             if member_id == exclude_user_id:
