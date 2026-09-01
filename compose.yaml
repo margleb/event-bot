@@ -31,8 +31,9 @@ services:
       - -c
       - |
         while true; do
-          python -m event_bot.import_events
-          python -m event_bot.embed_events
+          if python -m event_bot.import_events; then
+            python -m event_bot.embed_events
+          fi
           sleep 86400
         done
     logging:
@@ -57,6 +58,12 @@ services:
       - event_bot.webapp
     ports:
       - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/r/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
     logging:
       driver: json-file
       options:

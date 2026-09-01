@@ -8,7 +8,15 @@ from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 VISIT_EVENTS = ("miniapp.open", "command.start")
-ADMIN_EVENTS = ("command.admin", "command.feedbacks", "command.reply")
+ADMIN_EVENTS = (
+    "command.admin",
+    "command.feedbacks",
+    "command.reply",
+    "command.reports",
+    "command.reportdone",
+    "command.ban",
+    "command.unban",
+)
 PASSIVE_EVENTS = (
     *VISIT_EVENTS,
     "miniapp.tab.feed",
@@ -270,6 +278,129 @@ def build_admin_dashboard(
             """,
             (start_text, end_text, *admin_ids),
         ).fetchall()
+        cohort_admin_clause = (
+            f" AND user_id NOT IN ({','.join('?' for _ in admin_ids)})"
+            if admin_ids
+            else ""
+        )
+        funnel = conn.execute(
+            """
+            WITH cohort AS (
+                SELECT user_id, MIN(created_at) AS first_seen
+                FROM usage_events
+                GROUP BY user_id
+                HAVING first_seen >= ? AND first_seen < ?
+            )
+            SELECT
+                COUNT(*) AS discovered,
+                SUM(EXISTS(
+                    SELECT 1 FROM usage_events ue
+                    WHERE ue.user_id = cohort.user_id
+                      AND ue.event_name = 'miniapp.open'
+                )) AS opened_app,
+                SUM(EXISTS(
+                    SELECT 1 FROM users u WHERE u.telegram_id = cohort.user_id
+                )) AS profiled,
+                SUM(EXISTS(
+                    SELECT 1 FROM intents i WHERE i.user_id = cohort.user_id
+                )) AS saved_event,
+                SUM(EXISTS(
+                    SELECT 1 FROM event_group_members gm
+                    WHERE gm.user_id = cohort.user_id
+                )) AS searched_company,
+                SUM(EXISTS(
+                    SELECT 1 FROM requests r
+                    WHERE (r.from_user = cohort.user_id OR r.to_user = cohort.user_id)
+                      AND r.status = 'accepted'
+                )) AS connected
+            FROM cohort
+            WHERE 1 = 1
+            """
+            + cohort_admin_clause,
+            (start_text, end_text, *admin_ids),
+        ).fetchone()
+        campaign_admin_clause = (
+            f" AND ua.user_id NOT IN ({','.join('?' for _ in admin_ids)})"
+            if admin_ids
+            else ""
+        )
+        campaign_rows = conn.execute(
+            """
+            SELECT ua.campaign,
+                   COUNT(*) AS users,
+                   SUM(EXISTS(
+                       SELECT 1 FROM usage_events ue
+                       WHERE ue.user_id = ua.user_id
+                         AND ue.event_name = 'miniapp.open'
+                   )) AS opened_app,
+                   SUM(EXISTS(
+                       SELECT 1 FROM users u WHERE u.telegram_id = ua.user_id
+                   )) AS profiled,
+                   SUM(EXISTS(
+                       SELECT 1 FROM event_group_members gm
+                       WHERE gm.user_id = ua.user_id
+                   )) AS searched_company
+            FROM user_acquisition ua
+            WHERE ua.first_seen_at >= ? AND ua.first_seen_at < ?
+            """
+            + campaign_admin_clause
+            + """
+            GROUP BY ua.campaign
+            ORDER BY users DESC, ua.campaign
+            LIMIT 20
+            """,
+            (start_text, end_text, *admin_ids),
+        ).fetchall()
+        experience_rows = conn.execute(
+            """
+            SELECT outcome, COUNT(*) AS amount
+            FROM event_experience_feedback
+            WHERE created_at >= ? AND created_at < ?
+            GROUP BY outcome
+            ORDER BY amount DESC, outcome
+            """,
+            (start_text, end_text),
+        ).fetchall()
+        reports = conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) AS fresh
+            FROM user_reports
+            WHERE created_at >= ? AND created_at < ?
+            """,
+            (start_text, end_text),
+        ).fetchone()
+        source_health_rows = conn.execute(
+            """
+            WITH source_ids AS (
+                SELECT DISTINCT source_id
+                FROM events
+                WHERE source_id IS NOT NULL
+                UNION
+                SELECT DISTINCT source_id FROM source_sync_runs
+            ), active_counts AS (
+                SELECT source_id, COUNT(*) AS active_events
+                FROM events
+                WHERE source_id IS NOT NULL
+                  AND COALESCE(status, 'active') = 'active'
+                  AND COALESCE(end_date, date) > datetime('now', '+3 hours')
+                GROUP BY source_id
+            ), latest AS (
+                SELECT source_id, MAX(id) AS run_id
+                FROM source_sync_runs
+                GROUP BY source_id
+            )
+            SELECT ids.source_id, COALESCE(counts.active_events, 0) AS active_events,
+                   runs.status, runs.added, runs.updated, runs.skipped,
+                   runs.errors, runs.fetched, runs.error_message,
+                   runs.started_at, runs.finished_at
+            FROM source_ids ids
+            LEFT JOIN active_counts counts ON counts.source_id = ids.source_id
+            LEFT JOIN latest ON latest.source_id = ids.source_id
+            LEFT JOIN source_sync_runs runs ON runs.id = latest.run_id
+            ORDER BY ids.source_id
+            """
+        ).fetchall()
 
     daily_by_date = {row["day"]: row for row in daily_rows}
     daily = []
@@ -303,6 +434,51 @@ def build_admin_dashboard(
 
     prompts_sent = int(inactivity_feedback["prompts_sent"] or 0)
     inactivity_responses = int(inactivity_feedback["responses"] or 0)
+    funnel_labels = (
+        ("discovered", "Пришли в бот"),
+        ("opened_app", "Открыли Mini App"),
+        ("profiled", "Заполнили профиль"),
+        ("saved_event", "Отметили событие"),
+        ("searched_company", "Искали компанию"),
+        ("connected", "Обменялись контактами"),
+    )
+    funnel_total = int(funnel["discovered"] or 0)
+    experience_labels = {
+        "met": "Встретились",
+        "solo": "Сходили одни",
+        "no_show": "Никто не пришёл",
+        "unsafe": "Было некомфортно",
+    }
+    stale_before = current.astimezone(timezone.utc).replace(tzinfo=None) - timedelta(hours=36)
+    source_health = []
+    for row in source_health_rows:
+        finished = None
+        if row["finished_at"]:
+            try:
+                finished = datetime.strptime(row["finished_at"], DB_DATETIME_FORMAT)
+            except ValueError:
+                finished = None
+        health = "unknown"
+        if row["status"] == "failed":
+            health = "failed"
+        elif finished is not None and finished < stale_before:
+            health = "stale"
+        elif row["status"] in {"success", "warning"}:
+            health = row["status"]
+        source_health.append(
+            {
+                "source_id": row["source_id"],
+                "health": health,
+                "active_events": int(row["active_events"] or 0),
+                "fetched": int(row["fetched"] or 0),
+                "added": int(row["added"] or 0),
+                "updated": int(row["updated"] or 0),
+                "skipped": int(row["skipped"] or 0),
+                "errors": int(row["errors"] or 0),
+                "error_message": row["error_message"],
+                "finished_at": row["finished_at"],
+            }
+        )
 
     return {
         "days": days,
@@ -375,4 +551,36 @@ def build_admin_dashboard(
                 for row in inactivity_reason_rows
             ],
         },
+        "funnel": [
+            {
+                "stage": key,
+                "label": label,
+                "users": int(funnel[key] or 0),
+                "conversion": percentage(int(funnel[key] or 0), funnel_total),
+            }
+            for key, label in funnel_labels
+        ],
+        "campaigns": [
+            {
+                "campaign": row["campaign"],
+                "users": int(row["users"] or 0),
+                "opened_app": int(row["opened_app"] or 0),
+                "profiled": int(row["profiled"] or 0),
+                "searched_company": int(row["searched_company"] or 0),
+            }
+            for row in campaign_rows
+        ],
+        "company_outcomes": [
+            {
+                "outcome": row["outcome"],
+                "label": experience_labels.get(row["outcome"], row["outcome"]),
+                "amount": int(row["amount"]),
+            }
+            for row in experience_rows
+        ],
+        "reports": {
+            "total": int(reports["total"] or 0),
+            "new": int(reports["fresh"] or 0),
+        },
+        "source_health": source_health,
     }

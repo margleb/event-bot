@@ -225,6 +225,9 @@ button { border: 0; cursor: pointer; }
 .chat-form textarea { min-height: 42px; max-height: 120px; resize: vertical; padding: 10px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); outline: 0; font-size: 12px; }
 .chat-form button { width: 42px; height: 42px; border-radius: 12px; background: var(--coral); color: #fff; font-size: 20px; }
 .group-empty-copy { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.member-safety { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.member-safety button { padding: 0; background: transparent; color: var(--muted); font-size: 9px; text-decoration: underline; text-underline-offset: 2px; }
+.member-safety button:last-child { color: #b63c2c; }
 
 .profile-summary { display: flex; align-items: center; gap: 16px; padding: 24px 0; }
 .profile-avatar { width: 64px; height: 64px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border-radius: 50%; background: var(--coral); color: #fff; font: 26px "DM Serif Display", serif; }
@@ -270,6 +273,13 @@ button { border: 0; cursor: pointer; }
 .digest-section select { width: 100%; min-height: 43px; padding: 0 11px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper); }
 .secondary-button { min-height: 43px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); font-size: 12px; font-weight: 600; }
 .feedback-status, .form-error { margin: 0 2px; color: #c9391a; font-size: 11px; line-height: 1.4; }
+.account-section { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.account-section h3 { margin: 0 0 5px; font: 18px "DM Serif Display", serif; }
+.account-section p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.account-section .danger { flex: 0 0 auto; padding: 5px 0; }
+.deleted-account { min-height: 70vh; display: grid; align-content: center; padding: 24px; text-align: center; }
+.deleted-account h1 { margin: 0 0 10px; font: 34px "DM Serif Display", serif; }
+.deleted-account p { margin: 0; color: var(--muted); line-height: 1.55; }
 .primary-button { width: 100%; min-height: 48px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 11px 16px; border-radius: 12px; background: var(--coral); color: #fff; box-shadow: 0 3px 12px rgb(255 92 62 / .25); font-size: 14px; font-weight: 700; text-decoration: none; }
 .primary-button:disabled, .secondary-button:disabled { opacity: .55; }
 
@@ -310,6 +320,13 @@ button { border: 0; cursor: pointer; }
 .analytics-row b { grid-column: 2; grid-row: 1 / span 2; font: 18px "DM Serif Display", serif; }
 .analytics-row > i { height: 5px; display: block; margin-top: 6px; overflow: hidden; border-radius: 9px; background: var(--surface-soft); }
 .analytics-row > i span { height: 100%; display: block; border-radius: inherit; background: var(--coral); }
+.source-health-row { display: grid; grid-template-columns: minmax(0, 1fr) 10px; gap: 9px; align-items: center; }
+.source-health-row span { display: block; font-size: 11px; }
+.source-health-row small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.4; }
+.source-health-row > i { width: 9px; height: 9px; border-radius: 50%; background: #a9a49c; }
+.source-health-row.success > i { background: #22a06b; }
+.source-health-row.warning > i, .source-health-row.stale > i { background: #e09b2d; }
+.source-health-row.failed > i { background: #d83a2e; }
 .analytics-empty, .empty-state { padding: 32px 20px; border-radius: 18px; background: var(--surface); color: var(--body); font-size: 12px; text-align: center; }
 .empty-state span { display: block; margin-bottom: 10px; color: var(--coral); font-size: 32px; }
 .empty-state h3 { margin: 0 0 6px; font: 21px "DM Serif Display", serif; }

@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl
 from fastapi import Depends, Header, HTTPException, status
 
 from event_bot.analytics import is_admin
+from event_bot.db import is_user_suspended
 
 
 @dataclass(frozen=True)
@@ -100,9 +101,15 @@ async def authenticated_user(
     if not init_data:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Open this app from Telegram")
     try:
-        return validate_init_data(init_data, bot_token)
+        user = validate_init_data(init_data, bot_token)
     except ValueError as error:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(error)) from error
+    if is_user_suspended(user.id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Доступ ограничен. Для апелляции напишите боту /feedback.",
+        )
+    return user
 
 
 async def authenticated_admin(

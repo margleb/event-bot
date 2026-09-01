@@ -25,11 +25,16 @@ EVENT_LABELS = {
     "command.my": "Мои мероприятия",
     "command.group": "Группа",
     "command.feedback": "Обратная связь",
+    "command.reports": "Жалобы",
+    "command.reportdone": "Закрытие жалобы",
+    "command.ban": "Ограничение доступа",
+    "command.unban": "Снятие ограничения",
     "bot.text": "Текстовое сообщение боту",
     "callback.profile_confirm": "Подтверждение профиля",
     "callback.profile_edit": "Редактирование профиля",
     "callback.digest": "Настройка подборки",
     "callback.inactive_feedback": "Ответ на вопрос о неактивности",
+    "callback.event_experience": "Оценка встречи после события",
     "callback.intent.interested": "Отметка «Интересно»",
     "callback.intent.going": "Отметка «Пойду»",
     "callback.intent.not_going": "Отметка «Не подходит»",
@@ -129,6 +134,8 @@ def classify_bot_event(event: TelegramObject) -> str | None:
             return "callback.visibility"
         if prefix == "digest":
             return "callback.digest"
+        if prefix == "event_experience":
+            return "callback.event_experience"
         if prefix == "people":
             return "callback.people"
         if prefix == "req":
@@ -339,6 +346,24 @@ def build_admin_report() -> dict[str, object]:
         group_members = conn.execute(
             "SELECT COUNT(*) AS amount FROM event_group_members"
         ).fetchone()["amount"]
+        reports_new = conn.execute(
+            "SELECT COUNT(*) AS amount FROM user_reports WHERE status = 'new'"
+        ).fetchone()["amount"]
+        source_issue_rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT source_id, MAX(id) AS run_id
+                FROM source_sync_runs
+                GROUP BY source_id
+            )
+            SELECT runs.source_id, runs.status, runs.finished_at
+            FROM latest
+            JOIN source_sync_runs runs ON runs.id = latest.run_id
+            WHERE runs.status = 'failed' OR runs.finished_at < ?
+            ORDER BY runs.source_id
+            """,
+            ((datetime.now(timezone.utc) - timedelta(hours=36)).strftime(DB_DATETIME_FORMAT),),
+        ).fetchall()
         last_activity = conn.execute(
             "SELECT MAX(created_at) AS value FROM usage_events"
         ).fetchone()["value"]
@@ -361,6 +386,11 @@ def build_admin_report() -> dict[str, object]:
         "groups_total": groups["total"] or 0,
         "groups_active": groups["active"] or 0,
         "group_members": group_members,
+        "reports_new": reports_new,
+        "source_issues": [
+            (row["source_id"], row["status"], row["finished_at"])
+            for row in source_issue_rows
+        ],
         "last_activity": last_activity,
     }
 
@@ -521,6 +551,24 @@ def build_daily_admin_report(
         group_members = conn.execute(
             "SELECT COUNT(*) AS amount FROM event_group_members"
         ).fetchone()["amount"]
+        reports_new = conn.execute(
+            "SELECT COUNT(*) AS amount FROM user_reports WHERE status = 'new'"
+        ).fetchone()["amount"]
+        source_issue_rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT source_id, MAX(id) AS run_id
+                FROM source_sync_runs
+                GROUP BY source_id
+            )
+            SELECT runs.source_id, runs.status, runs.finished_at
+            FROM latest
+            JOIN source_sync_runs runs ON runs.id = latest.run_id
+            WHERE runs.status = 'failed' OR runs.finished_at < ?
+            ORDER BY runs.source_id
+            """,
+            ((current - timedelta(hours=36)).strftime(DB_DATETIME_FORMAT),),
+        ).fetchall()
 
     started_msk = started_at.astimezone(MOSCOW_TZ)
     current_msk = current.astimezone(MOSCOW_TZ)
@@ -545,6 +593,11 @@ def build_daily_admin_report(
         "groups_total": groups["total"] or 0,
         "groups_active": groups["active"] or 0,
         "group_members": group_members,
+        "reports_new": reports_new,
+        "source_issues": [
+            (row["source_id"], row["status"], row["finished_at"])
+            for row in source_issue_rows
+        ],
     }
 
 
@@ -555,6 +608,14 @@ def format_daily_admin_report(report: dict[str, object]) -> str:
         f"• {escape(EVENT_LABELS.get(name, name))} — <b>{amount}</b>"
         for name, amount in top
     ] or ["• Пока нет данных"]
+    source_issues = report.get("source_issues") or []
+    source_line = (
+        "⚠️ Источники: "
+        + ", ".join(escape(str(item[0])) for item in source_issues)
+        + " требуют проверки\n"
+        if source_issues
+        else "✅ Источники: сбоев нет\n"
+    )
     return (
         "📈 <b>Ежедневная сводка</b>\n"
         f"<i>{escape(str(report['period']))}</i>\n\n"
@@ -574,7 +635,9 @@ def format_daily_admin_report(report: dict[str, object]) -> str:
         f"всего — <b>{report['groups_total']}</b> · участников — "
         f"<b>{report['group_members']}</b>\n"
         f"👥 Всего пользователей: <b>{report['known_users']}</b>\n\n"
-        "Подробный отчёт: /admin · обращения: /feedbacks"
+        + source_line
+        + f"🚨 Новых жалоб: <b>{report.get('reports_new', 0)}</b>\n\n"
+        "Подробный отчёт: /admin · обращения: /feedbacks · жалобы: /reports"
     )
 
 

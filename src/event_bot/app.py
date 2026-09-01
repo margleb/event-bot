@@ -16,6 +16,7 @@ from event_bot.admin_digest import run_admin_report_scheduler
 from event_bot.db import init_db
 from event_bot.analytics import UsageTrackingMiddleware, get_admin_ids
 from event_bot.digest import run_digest_scheduler
+from event_bot.event_group_notifications import run_event_group_notification_scheduler
 from event_bot.handlers import router
 from event_bot.inactivity_feedback import run_inactivity_feedback_scheduler
 
@@ -46,6 +47,10 @@ async def run() -> None:
         BotCommand(command="admin", description="Статистика бота"),
         BotCommand(command="feedbacks", description="Обращения пользователей"),
         BotCommand(command="reply", description="Ответить на обращение"),
+        BotCommand(command="reports", description="Новые жалобы"),
+        BotCommand(command="reportdone", description="Закрыть жалобу"),
+        BotCommand(command="ban", description="Ограничить нарушителя"),
+        BotCommand(command="unban", description="Снять ограничение"),
     ]
     for admin_id in get_admin_ids():
         await bot.set_my_commands(
@@ -68,6 +73,7 @@ async def run() -> None:
         asyncio.create_task(run_digest_scheduler(bot)),
         asyncio.create_task(run_admin_report_scheduler(bot)),
         asyncio.create_task(run_inactivity_feedback_scheduler(bot)),
+        asyncio.create_task(run_event_group_notification_scheduler(bot)),
     ]
 
     try:

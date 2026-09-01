@@ -1,10 +1,11 @@
 # src/event_bot/handlers.py
 import os
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -34,10 +35,17 @@ from event_bot.db import (
     format_request_notification,
     get_user_intent,
     get_user_profile,
+    get_recent_user_reports,
     is_open_participant,
+    is_user_suspended,
     mark_visibility_asked,
     reject_connection_request,
+    record_user_acquisition,
+    resolve_user_report,
+    lift_user_suspension,
+    suspend_user,
     save_inactivity_feedback_response,
+    save_event_experience_feedback,
     save_intent,
     set_digest_schedule,
     set_intent_visibility,
@@ -129,8 +137,20 @@ async def _redirect_to_app(
 
 # CommandStart() — фильтр, срабатывает только на /start
 @router.message(CommandStart())
-async def start(message: Message, state: FSMContext) -> None:
+async def start(
+    message: Message,
+    state: FSMContext,
+    command: CommandObject,
+) -> None:
     await state.clear()
+    if message.from_user is not None:
+        if is_user_suspended(message.from_user.id):
+            await message.answer(
+                "Доступ к сервису ограничен. Если вы считаете это ошибкой, "
+                "отправьте апелляцию командой /feedback."
+            )
+            return
+        record_user_acquisition(message.from_user.id, command.args)
     miniapp_url = os.getenv("MINIAPP_URL", "").strip()
     await message.answer(
         "Мск.Митап подбирает мероприятия по вашим интересам и помогает "
@@ -290,6 +310,81 @@ async def reply_to_feedback(message: Message) -> None:
         await message.answer("Не удалось доставить ответ: пользователь недоступен.")
 
 
+@router.message(Command("reports"))
+async def show_user_reports(message: Message) -> None:
+    if message.from_user is None or not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    reports = get_recent_user_reports()
+    if not reports:
+        await message.answer("Новых жалоб нет.")
+        return
+    labels = {
+        "spam": "спам",
+        "harassment": "оскорбления/домогательства",
+        "unsafe": "небезопасное поведение",
+        "other": "другое",
+    }
+    for report in reports:
+        details = f"\nКомментарий: {escape(str(report['details']))}" if report["details"] else ""
+        await message.answer(
+            f"🚨 <b>Жалоба #{report['id']}</b>\n"
+            f"От: {escape(str(report['reporter_name'] or report['reporter_id']))}\n"
+            f"На: {escape(str(report['reported_name'] or report['reported_id']))}\n"
+            f"Событие: {escape(str(report['event_title'] or '—'))}\n"
+            f"Причина: {escape(labels.get(str(report['reason']), str(report['reason'])))}"
+            f"{details}\nЗакрыть: <code>/reportdone {report['id']}</code>"
+            f"\nОграничить: <code>/ban {report['reported_id']} причина</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+@router.message(Command("reportdone"))
+async def close_user_report(message: Message) -> None:
+    if message.from_user is None or not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /reportdone ID")
+        return
+    if resolve_user_report(int(parts[1])):
+        await message.answer(f"Жалоба #{parts[1]} закрыта.")
+    else:
+        await message.answer("Новая жалоба с таким ID не найдена.")
+
+
+@router.message(Command("ban"))
+async def ban_user(message: Message) -> None:
+    if message.from_user is None or not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("Формат: /ban TELEGRAM_ID причина")
+        return
+    reason = parts[2] if len(parts) == 3 else ""
+    if suspend_user(int(parts[1]), message.from_user.id, reason):
+        await message.answer(f"Доступ пользователя {parts[1]} к Mini App ограничен.")
+    else:
+        await message.answer("Пользователь не найден или действие недопустимо.")
+
+
+@router.message(Command("unban"))
+async def unban_user(message: Message) -> None:
+    if message.from_user is None or not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /unban TELEGRAM_ID")
+        return
+    if lift_user_suspension(int(parts[1])):
+        await message.answer(f"Доступ пользователя {parts[1]} восстановлен.")
+    else:
+        await message.answer("Активного ограничения для этого ID нет.")
+
+
 @router.callback_query(F.data == "feedback:start")
 async def start_feedback_from_button(
     callback: CallbackQuery,
@@ -440,6 +535,29 @@ async def handle_inactivity_feedback(
                 "Я передам его команде.",
                 reply_markup=feedback_cancel_keyboard(),
             )
+
+
+@router.callback_query(F.data.startswith("event_experience:"))
+async def handle_event_experience(callback: CallbackQuery) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdigit():
+        await callback.answer()
+        return
+    saved = save_event_experience_feedback(
+        int(parts[1]),
+        callback.from_user.id,
+        parts[2],
+    )
+    if not saved:
+        await callback.answer("Ответ не сохранён", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(reply_markup=None)
+        text = "Спасибо, это поможет улучшить подбор компаний."
+        if parts[2] == "unsafe":
+            text += " Если нужен ответ команды, напишите /feedback."
+        await callback.message.answer(text)
+    await callback.answer("Ответ сохранён")
 
 
 def _parse_event_callback(data: str | None) -> tuple[str, int] | None:

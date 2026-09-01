@@ -12,6 +12,7 @@ import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 from typing import Annotated
 
@@ -22,13 +23,23 @@ from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 
 from event_bot.admin_dashboard import build_admin_dashboard
-from event_bot.analytics import create_feedback, is_admin, notify_admins, record_usage
+from event_bot.analytics import (
+    create_feedback,
+    get_admin_ids,
+    is_admin,
+    notify_admins,
+    record_usage,
+)
 from event_bot.db import (
     INTENT_STATUSES,
     PARTICIPATING_STATUSES,
     accept_connection_request,
+    archive_expired_event_groups,
+    block_user,
     create_connection_request,
     create_event_group_message,
+    create_user_report,
+    delete_user_data,
     find_events,
     find_events_with_open_companies,
     get_digest_schedule,
@@ -74,6 +85,7 @@ from event_bot.web_schemas import (
     MeetingPointUpdate,
     ProfileUpdate,
     TrackEvent,
+    UserReportCreate,
     VisibilityUpdate,
 )
 
@@ -360,6 +372,7 @@ async def _embed_profile(profile: Profile) -> tuple[bytes | None, str | None, by
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    archive_expired_event_groups()
     yield
 
 
@@ -427,6 +440,43 @@ async def _notify_event_company(
     return delivered
 
 
+REPORT_REASON_LABELS = {
+    "spam": "спам или навязчивое общение",
+    "harassment": "оскорбления или домогательства",
+    "unsafe": "опасное поведение",
+    "other": "другая причина",
+}
+
+
+async def _notify_admins_about_report(report: dict[str, object]) -> None:
+    admin_ids = get_admin_ids()
+    if not admin_ids:
+        return
+    details = str(report.get("details") or "").strip()
+    text = (
+        f"🚨 <b>Жалоба #{int(report['id'])}</b>\n"
+        f"От: {escape(str(report['reporter_name']))}\n"
+        f"На: {escape(str(report['reported_name']))}\n"
+        f"Событие: {escape(str(report['event_title']))}\n"
+        f"Причина: {escape(REPORT_REASON_LABELS.get(str(report['reason']), str(report['reason'])))}"
+    )
+    if details:
+        text += f"\nКомментарий: {escape(details)}"
+    text += (
+        f"\n\nОграничить: <code>/ban {int(report['reported_id'])} причина</code>"
+        f"\nЗакрыть: <code>/reportdone {int(report['id'])}</code>"
+    )
+    bot = Bot(token=os.environ["BOT_TOKEN"])
+    try:
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(admin_id, text, parse_mode="HTML")
+            except Exception:
+                logger.warning("Не удалось отправить жалобу администратору %s", admin_id)
+    finally:
+        await bot.session.close()
+
+
 @app.get(f"{BASE_PATH}/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -436,6 +486,16 @@ def health() -> dict[str, str]:
 @app.get(f"{BASE_PATH}/app/", include_in_schema=False)
 def miniapp() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get(f"{BASE_PATH}/privacy", include_in_schema=False)
+def privacy() -> FileResponse:
+    return FileResponse(STATIC_DIR / "privacy.html")
+
+
+@app.get(f"{BASE_PATH}/rules", include_in_schema=False)
+def community_rules() -> FileResponse:
+    return FileResponse(STATIC_DIR / "rules.html")
 
 
 @app.get(f"{BASE_PATH}/api/bootstrap")
@@ -484,6 +544,14 @@ async def submit_feedback(
     finally:
         await bot.session.close()
     return {"status": "ok", "feedback_id": item.id}
+
+
+@app.delete(f"{BASE_PATH}/api/account")
+def delete_account(
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, str]:
+    delete_user_data(user.id)
+    return {"status": "deleted"}
 
 
 @app.put(f"{BASE_PATH}/api/profile")
@@ -567,10 +635,17 @@ async def join_event_company(
         record_usage(user.id, "miniapp.event_company.joined", "miniapp")
         if len(member_ids) >= 2:
             title = group["event"]["title"]
-            await _notify_event_company(
-                member_ids,
-                f"✨ Компания на «{title}» собрана. Уже можно знакомиться и договариваться о встрече.",
-            )
+            if group["status"] == "active":
+                await _notify_event_company(
+                    member_ids,
+                    f"✨ Компания на «{title}» собрана. Уже можно знакомиться и договариваться о встрече.",
+                )
+            else:
+                await _notify_event_company(
+                    member_ids,
+                    f"👥 К поиску компании на «{title}» присоединился новый участник: {group['member_count']} из {group['maximum_members']}.",
+                    exclude_user_id=user.id,
+                )
     return {"status": result, "event_group": group}
 
 
@@ -583,25 +658,41 @@ def event_company_state(
 
 
 @app.delete(f"{BASE_PATH}/api/event-groups/{{group_id}}")
-def leave_event_company(
+async def leave_event_company(
     group_id: int,
     user: Annotated[TelegramUser, Depends(authenticated_user)],
 ) -> dict[str, str]:
+    current = get_event_group(group_id, user.id)
     if not leave_event_group(group_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Компания не найдена")
+    if current is not None:
+        await _notify_event_company(
+            [int(member["user_id"]) for member in current["members"]],
+            f"👥 Состав компании на «{current['event'].title}» изменился. Мы продолжим поиск замены.",
+            exclude_user_id=user.id,
+        )
     record_usage(user.id, "miniapp.event_company.left", "miniapp")
     return {"status": "left"}
 
 
 @app.put(f"{BASE_PATH}/api/event-groups/{{group_id}}/rsvp")
-def update_event_company_rsvp(
+async def update_event_company_rsvp(
     group_id: int,
     payload: EventGroupRsvpUpdate,
     user: Annotated[TelegramUser, Depends(authenticated_user)],
 ) -> dict[str, object]:
+    current = get_event_group(group_id, user.id)
     if not set_event_group_rsvp(group_id, user.id, payload.status):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Компания не найдена")
     record_usage(user.id, f"miniapp.event_company.rsvp.{payload.status}", "miniapp")
+    if payload.status == "declined":
+        if current is not None:
+            await _notify_event_company(
+                [int(member["user_id"]) for member in current["members"]],
+                f"👥 {user.first_name} не сможет пойти на «{current['event'].title}». Мы освободили место и продолжим поиск.",
+                exclude_user_id=user.id,
+            )
+        return {"status": "left", "event_group": None}
     return {"status": "updated", "event_group": _fresh_event_group(group_id, user.id)}
 
 
@@ -712,6 +803,47 @@ def reject_event_company_connection(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Запрос не найден")
     record_usage(user.id, "miniapp.event_company.connection.rejected", "miniapp")
     return {"status": "rejected", "event_group": _fresh_event_group(group_id, user.id)}
+
+
+@app.post(f"{BASE_PATH}/api/event-groups/{{group_id}}/members/{{member_key}}/report")
+async def report_event_company_member(
+    group_id: int,
+    member_key: str,
+    payload: UserReportCreate,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, object]:
+    _event_id, target_user_id = _resolve_event_group_member(
+        group_id, user.id, member_key
+    )
+    result, report = create_user_report(
+        user.id,
+        target_user_id,
+        group_id,
+        payload.reason,
+        payload.details,
+    )
+    if result == "limit":
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много жалоб за сутки")
+    if result != "created" or report is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Не удалось отправить жалобу")
+    await _notify_admins_about_report(report)
+    record_usage(user.id, "miniapp.event_company.member.reported", "miniapp")
+    return {"status": "reported", "report_id": report["id"]}
+
+
+@app.post(f"{BASE_PATH}/api/event-groups/{{group_id}}/members/{{member_key}}/block")
+def block_event_company_member(
+    group_id: int,
+    member_key: str,
+    user: Annotated[TelegramUser, Depends(authenticated_user)],
+) -> dict[str, str]:
+    _event_id, target_user_id = _resolve_event_group_member(
+        group_id, user.id, member_key
+    )
+    if not block_user(user.id, target_user_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Не удалось заблокировать пользователя")
+    record_usage(user.id, "miniapp.event_company.member.blocked", "miniapp")
+    return {"status": "blocked"}
 
 
 

@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS event_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id INTEGER NOT NULL REFERENCES events(id),
     status TEXT NOT NULL DEFAULT 'forming',
+    target_size INTEGER NOT NULL DEFAULT 3,
     meeting_point TEXT,
     meeting_point_by INTEGER REFERENCES users(telegram_id),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -141,6 +142,63 @@ CREATE TABLE IF NOT EXISTS inactivity_feedback_prompts (
     response_code TEXT,
     responded_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS user_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id INTEGER NOT NULL,
+    reported_id INTEGER NOT NULL,
+    event_group_id INTEGER,
+    event_id INTEGER,
+    reason TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'new',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_suspensions (
+    user_id INTEGER PRIMARY KEY,
+    reason TEXT NOT NULL DEFAULT '',
+    created_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    lifted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS event_group_deliveries (
+    group_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'claimed',
+    delivered_at TEXT,
+    PRIMARY KEY (group_id, user_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS event_experience_feedback (
+    group_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_acquisition (
+    user_id INTEGER PRIMARY KEY,
+    campaign TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS source_sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    added INTEGER NOT NULL DEFAULT 0,
+    updated INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    errors INTEGER NOT NULL DEFAULT 0,
+    fetched INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL
+);
 """
 
 
@@ -172,6 +230,9 @@ ADDITIVE_COLUMNS = {
         "embedding_model": "TEXT",
         "content_hash": "TEXT",
     },
+    "event_groups": {
+        "target_size": "INTEGER",
+    },
 }
 
 
@@ -191,6 +252,12 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback_messages(status, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_inactivity_feedback_sent ON inactivity_feedback_prompts(prompt_sent_at)",
     "CREATE INDEX IF NOT EXISTS idx_inactivity_feedback_response ON inactivity_feedback_prompts(response_code, responded_at)",
+    "CREATE INDEX IF NOT EXISTS idx_user_reports_status_created ON user_reports(status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_user_suspensions_active ON user_suspensions(lifted_at, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_event_group_deliveries_kind ON event_group_deliveries(kind, status, delivered_at)",
+    "CREATE INDEX IF NOT EXISTS idx_event_feedback_outcome ON event_experience_feedback(outcome, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_user_acquisition_campaign ON user_acquisition(campaign, first_seen_at)",
+    "CREATE INDEX IF NOT EXISTS idx_source_sync_runs_source_finished ON source_sync_runs(source_id, finished_at)",
 )
 
 
@@ -214,6 +281,32 @@ def init_schema(db_path: Path) -> None:
         for table, columns in ADDITIVE_COLUMNS.items():
             for column, definition in columns.items():
                 _add_column_if_missing(conn, table, column, definition)
+        conn.execute(
+            """
+            UPDATE event_groups
+            SET target_size = CASE
+                WHEN status = 'active' THEN MAX(
+                    2,
+                    MIN(
+                        5,
+                        (SELECT COUNT(*) FROM event_group_members gm
+                         WHERE gm.group_id = event_groups.id)
+                    )
+                )
+                ELSE 3
+            END
+            WHERE target_size IS NULL OR target_size < 2 OR target_size > 5
+            """
+        )
+        conn.execute(
+            """
+            UPDATE event_groups
+            SET status = 'forming', activated_at = NULL
+            WHERE status = 'active'
+              AND (SELECT COUNT(*) FROM event_group_members gm
+                   WHERE gm.group_id = event_groups.id) < target_size
+            """
+        )
         conn.execute("DROP INDEX IF EXISTS idx_events_title_date")
         for statement in INDEXES:
             conn.execute(statement)

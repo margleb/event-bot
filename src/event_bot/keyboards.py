@@ -111,6 +111,23 @@ def inactivity_feedback_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def event_experience_keyboard(group_id: int) -> InlineKeyboardMarkup:
+    """Одноразовый опрос после мероприятия — без текста и личных данных."""
+    prefix = f"event_experience:{group_id}:"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🤝 Встретились", callback_data=prefix + "met"),
+                InlineKeyboardButton(text="👤 Сходил(а) один", callback_data=prefix + "solo"),
+            ],
+            [
+                InlineKeyboardButton(text="⏳ Никто не пришёл", callback_data=prefix + "no_show"),
+                InlineKeyboardButton(text="⚠️ Было некомфортно", callback_data=prefix + "unsafe"),
+            ],
+        ]
+    )
+
+
 def people_button(event_id: int) -> InlineKeyboardButton:
     """Кнопка «Кто идёт» — она нужна и под карточкой события, и в /my."""
     return InlineKeyboardButton(

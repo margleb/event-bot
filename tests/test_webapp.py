@@ -344,7 +344,9 @@ def test_event_first_company_flow_is_scoped_to_one_event(
     assert meeting.status_code == 200
     assert meeting.json()["event_group"]["meeting_point"] == "У главного входа в 18:45"
     assert rsvp.status_code == 200
-    assert next(
-        member for member in rsvp.json()["event_group"]["members"] if member["is_me"]
-    )["rsvp"] == "declined"
+    assert rsvp.json() == {"status": "left", "event_group": None}
+    remaining = db.get_event_group(concert_group_id, users[0])
+    assert remaining is not None
+    assert remaining["status"] == "forming"
+    assert remaining["member_count"] == 1
     assert outsider_message.status_code == 409

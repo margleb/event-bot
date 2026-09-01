@@ -9,9 +9,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260831-company-discovery">
+    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260831-release-readiness">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/r/app/assets/app.js?v=20260831-architecture-refactor" defer></script>
+    <script src="/r/app/assets/app.js?v=20260831-release-readiness" defer></script>
   </head>
   <body>
     <div id="loading" class="state-screen">
@@ -126,6 +126,26 @@
           <article class="analytics-card">
             <div class="analytics-card-heading">
               <div>
+                <p class="eyebrow">ВОРОНКА</p>
+                <h3>От запуска до знакомства</h3>
+              </div>
+            </div>
+            <div id="admin-funnel" class="analytics-list"></div>
+          </article>
+
+          <article class="analytics-card">
+            <div class="analytics-card-heading">
+              <div>
+                <p class="eyebrow">РЕКЛАМА</p>
+                <h3>Кампании /start</h3>
+              </div>
+            </div>
+            <div id="admin-campaigns" class="analytics-list"></div>
+          </article>
+
+          <article class="analytics-card">
+            <div class="analytics-card-heading">
+              <div>
                 <p class="eyebrow">РЕГУЛЯРНОСТЬ</p>
                 <h3>Как часто возвращаются</h3>
               </div>
@@ -164,6 +184,27 @@
             </div>
             <div id="admin-sources" class="analytics-list"></div>
           </article>
+
+          <article class="analytics-card">
+            <div class="analytics-card-heading">
+              <div>
+                <p class="eyebrow">КАЧЕСТВО ВСТРЕЧ</p>
+                <h3>Чем закончились компании</h3>
+              </div>
+              <span id="admin-reports" class="count-badge">0 жалоб</span>
+            </div>
+            <div id="admin-company-outcomes" class="analytics-list"></div>
+          </article>
+
+          <article class="analytics-card">
+            <div class="analytics-card-heading">
+              <div>
+                <p class="eyebrow">ИМПОРТ АФИШИ</p>
+                <h3>Здоровье источников</h3>
+              </div>
+            </div>
+            <div id="admin-source-health" class="analytics-list"></div>
+          </article>
         </section>
 
         <section id="profile-panel" class="panel" data-panel="profile">
@@ -178,7 +219,8 @@
           <div id="profile-menu" class="profile-menu">
             <button type="button" data-profile-section="preferences"><span>Интересы и подбор</span><b>›</b></button>
             <button type="button" data-profile-section="notifications"><span>Уведомления</span><b>›</b></button>
-            <button type="button" data-profile-info="privacy"><span>Конфиденциальность</span><b>›</b></button>
+            <button type="button" data-open-privacy><span>Конфиденциальность и данные</span><b>›</b></button>
+            <button type="button" data-open-rules><span>Правила безопасного общения</span><b>›</b></button>
             <button type="button" data-profile-section="feedback"><span>Написать команде</span><b>›</b></button>
             <button id="admin-profile-menu-button" class="hidden" type="button" data-tab="admin"><span>Аналитика администратора</span><b>›</b></button>
             <button type="button" data-profile-info="about"><span>О приложении</span><b>›</b></button>
@@ -265,6 +307,11 @@
               <textarea id="feedback-input" class="wide-input" minlength="3" maxlength="2000" rows="4" placeholder="Расскажите, что можно улучшить"></textarea>
               <button id="send-feedback" class="secondary-button" type="button">Отправить сообщение</button>
               <p id="feedback-status" class="feedback-status hidden"></p>
+            </div>
+
+            <div class="form-section account-section">
+              <div><h3>Удаление аккаунта</h3><p>Профиль, история использования, компании, сообщения и контакты будут удалены безвозвратно.</p></div>
+              <button id="delete-account" class="text-button danger" type="button">Удалить профиль и данные</button>
             </div>
 
             <button id="admin-profile-button" class="secondary-button admin-entry hidden" type="button" data-tab="admin">Открыть аналитику администратора</button>

@@ -1,8 +1,9 @@
 # src/event_bot/db.py
 import json
 import logging
+import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -279,6 +280,22 @@ def update_user_identity(
             """,
             (name, username, telegram_id),
         )
+
+
+ACQUISITION_CAMPAIGN_PATTERN = re.compile(r"^[a-z0-9_-]{1,64}$")
+
+
+def record_user_acquisition(user_id: int, campaign: str | None) -> bool:
+    """Store the first trusted Telegram /start payload for attribution."""
+    value = (campaign or "").strip().lower()
+    if user_id <= 0 or not ACQUISITION_CAMPAIGN_PATTERN.fullmatch(value):
+        return False
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO user_acquisition (user_id, campaign) VALUES (?, ?)",
+            (user_id, value),
+        )
+    return cursor.rowcount > 0
 
 
 def get_user_profile(telegram_id: int) -> Profile | None:
@@ -608,7 +625,7 @@ def find_events(
         # active включает и будущие, и уже начавшиеся, но ещё не завершённые
         "WHERE city = 'Москва'"
         " AND status = 'active'"
-        " AND COALESCE(end_date, date) > datetime('now', 'localtime')",
+        " AND COALESCE(end_date, date) > datetime('now', '+3 hours')",
     ]
     params: list[object] = []
 
@@ -675,6 +692,127 @@ EVENT_GROUP_MIN_MEMBERS = 2
 EVENT_GROUP_MAX_MEMBERS = 5
 
 
+def _normalized_company_preference(
+    minimum: int | None,
+    maximum: int | None,
+) -> tuple[int, int]:
+    """Return a supported 2–5 range, including profiles saved by old clients."""
+    low = max(EVENT_GROUP_MIN_MEMBERS, min(EVENT_GROUP_MAX_MEMBERS, minimum or 2))
+    high = max(EVENT_GROUP_MIN_MEMBERS, min(EVENT_GROUP_MAX_MEMBERS, maximum or 5))
+    return (low, high) if low <= high else (EVENT_GROUP_MIN_MEMBERS, EVENT_GROUP_MAX_MEMBERS)
+
+
+def _preferred_company_size(minimum: int | None, maximum: int | None) -> int:
+    # «Неважно» оптимизируем под скорость сбора: два участника
+    # уже могут безопасно договариваться внутри закрытой компании.
+    if minimum is None and maximum is None:
+        return EVENT_GROUP_MIN_MEMBERS
+    low, high = _normalized_company_preference(minimum, maximum)
+    if low == high:
+        return low
+    return 3 if low <= 3 <= high else low
+
+
+def _refresh_event_group_status(conn: sqlite3.Connection, group_id: int) -> int:
+    """Recalculate one company's state after a member or event changed."""
+    row = conn.execute(
+        """
+        SELECT eg.target_size,
+               COALESCE(e.end_date, datetime(e.date, '+3 hours')) AS effective_end,
+               COUNT(gm.user_id) AS member_count
+        FROM event_groups eg
+        JOIN events e ON e.id = eg.event_id
+        LEFT JOIN event_group_members gm ON gm.group_id = eg.id
+        WHERE eg.id = ?
+        GROUP BY eg.id
+        """,
+        (group_id,),
+    ).fetchone()
+    if row is None:
+        return 0
+    amount = int(row["member_count"])
+    if amount == 0:
+        conn.execute("DELETE FROM event_group_messages WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM event_group_deliveries WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM event_experience_feedback WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM event_groups WHERE id = ?", (group_id,))
+        return 0
+    expired = conn.execute(
+        "SELECT ? <= datetime('now', '+3 hours') AS value",
+        (row["effective_end"],),
+    ).fetchone()["value"]
+    if expired:
+        conn.execute("UPDATE event_groups SET status = 'archived' WHERE id = ?", (group_id,))
+    elif amount >= int(row["target_size"]):
+        conn.execute(
+            """
+            UPDATE event_groups
+            SET status = 'active', activated_at = COALESCE(activated_at, datetime('now'))
+            WHERE id = ?
+            """,
+            (group_id,),
+        )
+    else:
+        conn.execute(
+            "UPDATE event_groups SET status = 'forming', activated_at = NULL WHERE id = ?",
+            (group_id,),
+        )
+    return amount
+
+
+def _leave_event_group_in_connection(
+    conn: sqlite3.Connection,
+    group_id: int,
+    user_id: int,
+) -> bool:
+    deleted = conn.execute(
+        "DELETE FROM event_group_members WHERE group_id = ? AND user_id = ?",
+        (group_id, user_id),
+    )
+    if deleted.rowcount == 0:
+        return False
+    conn.execute(
+        "DELETE FROM event_group_messages WHERE group_id = ? AND user_id = ?",
+        (group_id, user_id),
+    )
+    conn.execute(
+        "DELETE FROM event_group_deliveries WHERE group_id = ? AND user_id = ?",
+        (group_id, user_id),
+    )
+    conn.execute(
+        "DELETE FROM event_experience_feedback WHERE group_id = ? AND user_id = ?",
+        (group_id, user_id),
+    )
+    conn.execute(
+        """
+        UPDATE event_groups
+        SET meeting_point = NULL, meeting_point_by = NULL
+        WHERE id = ? AND meeting_point_by = ?
+        """,
+        (group_id, user_id),
+    )
+    _refresh_event_group_status(conn, group_id)
+    return True
+
+
+def archive_expired_event_groups() -> int:
+    """Archive companies after the event end (or three hours after start)."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE event_groups
+            SET status = 'archived'
+            WHERE status != 'archived'
+              AND event_id IN (
+                  SELECT id FROM events
+                  WHERE COALESCE(end_date, datetime(date, '+3 hours'))
+                        <= datetime('now', '+3 hours')
+              )
+            """
+        )
+        return cursor.rowcount
+
+
 def find_events_with_open_companies(*, limit: int = 12) -> list[Event]:
     """Будущие события, где хотя бы одна компания ещё принимает участников."""
     with get_connection() as conn:
@@ -688,19 +826,19 @@ def find_events_with_open_companies(*, limit: int = 12) -> list[Event]:
                     SELECT eg.id, eg.event_id, eg.created_at
                     FROM event_groups eg
                     JOIN event_group_members gm ON gm.group_id = eg.id
-                    WHERE eg.status IN ('forming', 'active')
+                    WHERE eg.status = 'forming'
                     GROUP BY eg.id
-                    HAVING COUNT(gm.user_id) < ?
+                    HAVING COUNT(gm.user_id) < eg.target_size
                 ) AS open_groups
                 GROUP BY open_groups.event_id
             ) AS discovery ON discovery.event_id = e.id
             WHERE e.city = 'Москва'
               AND COALESCE(e.status, 'active') = 'active'
-              AND COALESCE(e.end_date, e.date) > datetime('now', 'localtime')
+              AND COALESCE(e.end_date, e.date) > datetime('now', '+3 hours')
             ORDER BY discovery.newest_group DESC, e.date, e.id
             LIMIT ?
             """,
-            (EVENT_GROUP_MAX_MEMBERS, max(1, min(limit, 50))),
+            (max(1, min(limit, 50)),),
         ).fetchall()
     events: list[Event] = []
     for row in rows:
@@ -723,18 +861,18 @@ def join_event_group(
     """
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        eligible = conn.execute(
+        user = conn.execute(
             """
-            SELECT 1
+            SELECT u.interests, u.group_size_min, u.group_size_max
             FROM users u
             JOIN events e ON e.id = ?
             WHERE u.telegram_id = ?
               AND COALESCE(e.status, 'active') = 'active'
-              AND COALESCE(e.end_date, e.date) > datetime('now', 'localtime')
+              AND COALESCE(e.end_date, e.date) > datetime('now', '+3 hours')
             """,
             (event_id, user_id),
         ).fetchone()
-        if eligible is None:
+        if user is None:
             return "unavailable", None, []
 
         existing = conn.execute(
@@ -757,13 +895,26 @@ def join_event_group(
             ]
             return "already", existing["id"], member_ids
 
+        preference_min, preference_max = _normalized_company_preference(
+            user["group_size_min"], user["group_size_max"]
+        )
+        try:
+            user_interests = {
+                value.strip().casefold()
+                for value in json.loads(user["interests"])
+                if isinstance(value, str) and value.strip()
+            }
+        except (TypeError, json.JSONDecodeError):
+            user_interests = set()
+
         candidates = conn.execute(
             """
-            SELECT eg.id, COUNT(gm.user_id) AS member_count
+            SELECT eg.id, eg.target_size, COUNT(gm.user_id) AS member_count
             FROM event_groups eg
             LEFT JOIN event_group_members gm ON gm.group_id = eg.id
             WHERE eg.event_id = ?
-              AND eg.status IN ('forming', 'active')
+              AND eg.status = 'forming'
+              AND eg.target_size BETWEEN ? AND ?
               AND NOT EXISTS (
                   SELECT 1
                   FROM event_group_members existing_member
@@ -773,17 +924,54 @@ def join_event_group(
                   WHERE existing_member.group_id = eg.id
               )
             GROUP BY eg.id
-            HAVING COUNT(gm.user_id) < ?
-            ORDER BY COUNT(gm.user_id) DESC, eg.created_at, eg.id
+            HAVING COUNT(gm.user_id) < eg.target_size
+            ORDER BY eg.created_at, eg.id
             """,
-            (event_id, user_id, user_id, EVENT_GROUP_MAX_MEMBERS),
+            (
+                event_id,
+                preference_min,
+                preference_max,
+                user_id,
+                user_id,
+            ),
         ).fetchall()
         if candidates:
-            group_id = candidates[0]["id"]
+            ranked_candidates: list[tuple[int, int, int]] = []
+            for candidate in candidates:
+                member_rows = conn.execute(
+                    """
+                    SELECT u.interests
+                    FROM event_group_members gm
+                    JOIN users u ON u.telegram_id = gm.user_id
+                    WHERE gm.group_id = ?
+                    """,
+                    (candidate["id"],),
+                ).fetchall()
+                group_interests: set[str] = set()
+                for member in member_rows:
+                    try:
+                        group_interests.update(
+                            value.strip().casefold()
+                            for value in json.loads(member["interests"])
+                            if isinstance(value, str) and value.strip()
+                        )
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                ranked_candidates.append(
+                    (
+                        len(user_interests & group_interests),
+                        int(candidate["member_count"]),
+                        int(candidate["id"]),
+                    )
+                )
+            group_id = max(ranked_candidates, key=lambda item: item[:2])[2]
         else:
+            target_size = _preferred_company_size(
+                user["group_size_min"], user["group_size_max"]
+            )
             group_id = conn.execute(
-                "INSERT INTO event_groups (event_id) VALUES (?)",
-                (event_id,),
+                "INSERT INTO event_groups (event_id, target_size) VALUES (?, ?)",
+                (event_id, target_size),
             ).lastrowid
 
         conn.execute(
@@ -814,16 +1002,7 @@ def join_event_group(
                 (group_id,),
             )
         ]
-        if len(member_ids) >= EVENT_GROUP_MIN_MEMBERS:
-            conn.execute(
-                """
-                UPDATE event_groups
-                SET status = 'active',
-                    activated_at = COALESCE(activated_at, datetime('now'))
-                WHERE id = ?
-                """,
-                (group_id,),
-            )
+        _refresh_event_group_status(conn, group_id)
         return "joined", group_id, member_ids
 
 
@@ -837,6 +1016,7 @@ def _event_group_payload_in_connection(
         SELECT e.*,
                eg.id AS event_group_id,
                eg.status AS event_group_status,
+               eg.target_size,
                eg.meeting_point,
                eg.meeting_point_by,
                eg.created_at AS event_group_created_at
@@ -906,8 +1086,8 @@ def _event_group_payload_in_connection(
         "event": event,
         "meeting_point": group_row["meeting_point"],
         "meeting_point_by": group_row["meeting_point_by"],
-        "minimum_members": EVENT_GROUP_MIN_MEMBERS,
-        "maximum_members": EVENT_GROUP_MAX_MEMBERS,
+        "minimum_members": group_row["target_size"],
+        "maximum_members": group_row["target_size"],
         "member_count": len(members),
         "members": members,
         "messages": [
@@ -937,6 +1117,9 @@ def get_user_event_groups(user_id: int, *, limit: int = 20) -> list[dict[str, ob
             JOIN event_group_members gm ON gm.group_id = eg.id
             JOIN events e ON e.id = eg.event_id
             WHERE gm.user_id = ?
+              AND eg.status != 'archived'
+              AND COALESCE(e.end_date, datetime(e.date, '+3 hours'))
+                    > datetime('now', '+3 hours')
             ORDER BY e.date, eg.id
             LIMIT ?
             """,
@@ -961,7 +1144,9 @@ def get_event_company_counts(event_ids: list[int]) -> dict[int, int]:
             FROM event_groups eg
             JOIN event_group_members gm ON gm.group_id = eg.id
             WHERE eg.event_id IN ({placeholders})
+              AND eg.status = 'forming'
             GROUP BY eg.event_id
+            HAVING COUNT(gm.user_id) < eg.target_size
             """,
             event_ids,
         ).fetchall()
@@ -971,25 +1156,7 @@ def get_event_company_counts(event_ids: list[int]) -> dict[int, int]:
 def leave_event_group(group_id: int, user_id: int) -> bool:
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        deleted = conn.execute(
-            "DELETE FROM event_group_members WHERE group_id = ? AND user_id = ?",
-            (group_id, user_id),
-        )
-        if deleted.rowcount == 0:
-            return False
-        amount = conn.execute(
-            "SELECT COUNT(*) AS amount FROM event_group_members WHERE group_id = ?",
-            (group_id,),
-        ).fetchone()["amount"]
-        if amount == 0:
-            conn.execute("DELETE FROM event_group_messages WHERE group_id = ?", (group_id,))
-            conn.execute("DELETE FROM event_groups WHERE id = ?", (group_id,))
-        elif amount < EVENT_GROUP_MIN_MEMBERS:
-            conn.execute(
-                "UPDATE event_groups SET status = 'forming', activated_at = NULL WHERE id = ?",
-                (group_id,),
-            )
-        return True
+        return _leave_event_group_in_connection(conn, group_id, user_id)
 
 
 def set_event_group_rsvp(group_id: int, user_id: int, rsvp: str) -> bool:
@@ -1008,13 +1175,15 @@ def set_event_group_rsvp(group_id: int, user_id: int, rsvp: str) -> bool:
         if row is None:
             return False
         conn.execute(
-            "UPDATE event_group_members SET rsvp = ? WHERE group_id = ? AND user_id = ?",
-            (rsvp, group_id, user_id),
-        )
-        conn.execute(
             "UPDATE intents SET status = ?, updated_at = datetime('now') "
             "WHERE user_id = ? AND event_id = ?",
             ("going" if rsvp == "going" else "not_going", user_id, row["event_id"]),
+        )
+        if rsvp == "declined":
+            return _leave_event_group_in_connection(conn, group_id, user_id)
+        conn.execute(
+            "UPDATE event_group_members SET rsvp = 'going' WHERE group_id = ? AND user_id = ?",
+            (group_id, user_id),
         )
         return True
 
@@ -1075,6 +1244,142 @@ def create_event_group_message(
             )
         ]
         return "created", member_ids
+
+
+EVENT_EXPERIENCE_OUTCOMES = {"met", "no_show", "solo", "unsafe"}
+EVENT_GROUP_DELIVERY_KINDS = {"reminder_24h", "experience_prompt"}
+
+
+def get_due_event_group_deliveries(
+    kind: str,
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    """Return due per-member notifications that have not been delivered."""
+    if kind not in EVENT_GROUP_DELIVERY_KINDS:
+        raise ValueError("Неизвестный тип уведомления")
+    current = now or datetime.now(ZoneInfo("Europe/Moscow"))
+    if current.tzinfo is not None:
+        current = current.astimezone(ZoneInfo("Europe/Moscow")).replace(tzinfo=None)
+    current_text = current.strftime(DB_DATETIME_FORMAT)
+    retry_before = (current - timedelta(hours=6)).strftime(DB_DATETIME_FORMAT)
+    if kind == "reminder_24h":
+        due_clause = "e.date > ? AND e.date <= datetime(?, '+24 hours') AND eg.status = 'active'"
+    else:
+        due_clause = (
+            "COALESCE(e.end_date, datetime(e.date, '+3 hours')) <= ? "
+            "AND COALESCE(e.end_date, datetime(e.date, '+3 hours')) > datetime(?, '-7 days') "
+            "AND eg.activated_at IS NOT NULL"
+        )
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT eg.id AS group_id, gm.user_id, eg.meeting_point,
+                   e.id AS event_id, e.title, e.date, e.venue, e.address
+            FROM event_groups eg
+            JOIN event_group_members gm ON gm.group_id = eg.id
+            JOIN events e ON e.id = eg.event_id
+            LEFT JOIN event_group_deliveries d
+              ON d.group_id = eg.id AND d.user_id = gm.user_id AND d.kind = ?
+            WHERE gm.rsvp = 'going'
+              AND {due_clause}
+              AND (
+                  d.group_id IS NULL
+                  OR (d.status IN ('claimed', 'failed') AND d.delivered_at <= ?)
+              )
+            ORDER BY e.date, eg.id, gm.joined_at
+            LIMIT ?
+            """,
+            (kind, current_text, current_text, retry_before, max(1, min(limit, 500))),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_event_group_delivery(
+    group_id: int,
+    user_id: int,
+    kind: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Atomically claim one delivery; stale failed claims may be retried."""
+    if kind not in EVENT_GROUP_DELIVERY_KINDS:
+        return False
+    current = now or datetime.now(ZoneInfo("Europe/Moscow"))
+    if current.tzinfo is not None:
+        current = current.astimezone(ZoneInfo("Europe/Moscow")).replace(tzinfo=None)
+    current_text = current.strftime(DB_DATETIME_FORMAT)
+    retry_before = (current - timedelta(hours=6)).strftime(DB_DATETIME_FORMAT)
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT status, delivered_at FROM event_group_deliveries "
+            "WHERE group_id = ? AND user_id = ? AND kind = ?",
+            (group_id, user_id, kind),
+        ).fetchone()
+        if existing is not None and (
+            existing["status"] == "sent"
+            or not existing["delivered_at"]
+            or existing["delivered_at"] > retry_before
+        ):
+            return False
+        conn.execute(
+            """
+            INSERT INTO event_group_deliveries
+                (group_id, user_id, kind, status, delivered_at)
+            VALUES (?, ?, ?, 'claimed', ?)
+            ON CONFLICT(group_id, user_id, kind) DO UPDATE SET
+                status = 'claimed', delivered_at = excluded.delivered_at
+            """,
+            (group_id, user_id, kind, current_text),
+        )
+        return True
+
+
+def mark_event_group_delivery(
+    group_id: int,
+    user_id: int,
+    kind: str,
+    delivery_status: str,
+) -> None:
+    if kind not in EVENT_GROUP_DELIVERY_KINDS or delivery_status not in {"sent", "failed"}:
+        return
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE event_group_deliveries
+            SET status = ?, delivered_at = datetime('now', '+3 hours')
+            WHERE group_id = ? AND user_id = ? AND kind = ?
+            """,
+            (delivery_status, group_id, user_id, kind),
+        )
+
+
+def save_event_experience_feedback(
+    group_id: int,
+    user_id: int,
+    outcome: str,
+) -> bool:
+    if outcome not in EVENT_EXPERIENCE_OUTCOMES:
+        return False
+    with get_connection() as conn:
+        member = conn.execute(
+            "SELECT 1 FROM event_group_members WHERE group_id = ? AND user_id = ?",
+            (group_id, user_id),
+        ).fetchone()
+        if member is None:
+            return False
+        conn.execute(
+            """
+            INSERT INTO event_experience_feedback (group_id, user_id, outcome)
+            VALUES (?, ?, ?)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                outcome = excluded.outcome, created_at = datetime('now')
+            """,
+            (group_id, user_id, outcome),
+        )
+        return True
 
 
 def _format_source_link(event: Event) -> str:
@@ -1225,6 +1530,52 @@ def upsert_source_events(
                 existing.add(key)
 
     return added, updated, errors
+
+
+def record_source_sync_run(
+    source_id: str,
+    sync_status: str,
+    *,
+    added: int = 0,
+    updated: int = 0,
+    skipped: int = 0,
+    errors: int = 0,
+    fetched: int = 0,
+    error_message: str | None = None,
+    started_at: datetime,
+    finished_at: datetime,
+) -> int:
+    """Persist one importer outcome so source health is visible to admins."""
+    if sync_status not in {"success", "warning", "failed"}:
+        raise ValueError("Недопустимый статус импорта")
+
+    def utc_text(value: datetime) -> str:
+        if value.tzinfo is not None:
+            value = value.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+        return value.strftime(DB_DATETIME_FORMAT)
+
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO source_sync_runs
+                (source_id, status, added, updated, skipped, errors, fetched,
+                 error_message, started_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id[:40],
+                sync_status,
+                max(0, added),
+                max(0, updated),
+                max(0, skipped),
+                max(0, errors),
+                max(0, fetched),
+                (error_message or "")[:1000] or None,
+                utc_text(started_at),
+                utc_text(finished_at),
+            ),
+        )
+    return int(cursor.lastrowid)
 
 
 def delete_legacy_events() -> int:
@@ -1770,11 +2121,12 @@ def reject_connection_request(request_id: int, to_user: int) -> bool:
 
 
 def block_user(blocker: int, blocked: int) -> bool:
-    """Блокирует глобально и отклоняет pending-запросы в обе стороны."""
+    """Block globally, reject requests and separate the pair from shared groups."""
     if blocker == blocked:
         return False
 
     with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         # Не создаём блок для несуществующего пользователя из поддельного
         # callback_data.
         exists = conn.execute(
@@ -1801,7 +2153,234 @@ def block_user(blocker: int, blocked: int) -> bool:
             """,
             (blocker, blocked, blocked, blocker),
         )
+        shared_group_ids = [
+            row["group_id"]
+            for row in conn.execute(
+                """
+                SELECT mine.group_id
+                FROM event_group_members mine
+                JOIN event_group_members other ON other.group_id = mine.group_id
+                WHERE mine.user_id = ? AND other.user_id = ?
+                """,
+                (blocker, blocked),
+            ).fetchall()
+        ]
+        for group_id in shared_group_ids:
+            _leave_event_group_in_connection(conn, group_id, blocker)
         return True
+
+
+USER_REPORT_REASONS = {"spam", "harassment", "unsafe", "other"}
+
+
+def create_user_report(
+    reporter_id: int,
+    reported_id: int,
+    group_id: int,
+    reason: str,
+    details: str = "",
+) -> tuple[str, dict[str, object] | None]:
+    """Create a rate-limited report only for members of the same company."""
+    if reporter_id == reported_id or reason not in USER_REPORT_REASONS:
+        return "unavailable", None
+    with get_connection() as conn:
+        eligible = conn.execute(
+            """
+            SELECT eg.event_id, e.title AS event_title,
+                   reporter.name AS reporter_name,
+                   reported.name AS reported_name
+            FROM event_groups eg
+            JOIN events e ON e.id = eg.event_id
+            JOIN event_group_members mine
+              ON mine.group_id = eg.id AND mine.user_id = ?
+            JOIN event_group_members target
+              ON target.group_id = eg.id AND target.user_id = ?
+            JOIN users reporter ON reporter.telegram_id = mine.user_id
+            JOIN users reported ON reported.telegram_id = target.user_id
+            WHERE eg.id = ?
+            """,
+            (reporter_id, reported_id, group_id),
+        ).fetchone()
+        if eligible is None:
+            return "unavailable", None
+        recent = conn.execute(
+            """
+            SELECT COUNT(*) AS amount
+            FROM user_reports
+            WHERE reporter_id = ? AND created_at >= datetime('now', '-24 hours')
+            """,
+            (reporter_id,),
+        ).fetchone()["amount"]
+        if recent >= 5:
+            return "limit", None
+        cursor = conn.execute(
+            """
+            INSERT INTO user_reports
+                (reporter_id, reported_id, event_group_id, event_id, reason, details)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                reporter_id,
+                reported_id,
+                group_id,
+                eligible["event_id"],
+                reason,
+                " ".join(details.strip().split())[:1000],
+            ),
+        )
+        return "created", {
+            "id": cursor.lastrowid,
+            "reported_id": reported_id,
+            "reporter_name": eligible["reporter_name"].strip() or UNKNOWN_NAME,
+            "reported_name": eligible["reported_name"].strip() or UNKNOWN_NAME,
+            "event_title": eligible["event_title"],
+            "reason": reason,
+            "details": " ".join(details.strip().split())[:1000],
+        }
+
+
+def get_recent_user_reports(
+    *,
+    only_new: bool = True,
+    limit: int = 10,
+) -> list[dict[str, object]]:
+    where = "WHERE reports.status = 'new'" if only_new else ""
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT reports.id, reports.reason, reports.details, reports.status,
+                   reports.created_at, reports.reporter_id, reports.reported_id,
+                   reporter.name AS reporter_name,
+                   reported.name AS reported_name,
+                   events.title AS event_title
+            FROM user_reports reports
+            LEFT JOIN users reporter ON reporter.telegram_id = reports.reporter_id
+            LEFT JOIN users reported ON reported.telegram_id = reports.reported_id
+            LEFT JOIN events ON events.id = reports.event_id
+            {where}
+            ORDER BY CASE reports.status WHEN 'new' THEN 0 ELSE 1 END,
+                     reports.created_at DESC, reports.id DESC
+            LIMIT ?
+            """,
+            (max(1, min(limit, 30)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def resolve_user_report(report_id: int) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE user_reports SET status = 'resolved' WHERE id = ? AND status = 'new'",
+            (report_id,),
+        )
+    return cursor.rowcount > 0
+
+
+def is_user_suspended(user_id: int) -> bool:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT 1 FROM user_suspensions WHERE user_id = ? AND lifted_at IS NULL",
+            (user_id,),
+        ).fetchone() is not None
+
+
+def suspend_user(user_id: int, admin_id: int, reason: str = "") -> bool:
+    if user_id <= 0 or admin_id <= 0 or user_id == admin_id:
+        return False
+    normalized = " ".join(reason.strip().split())[:500]
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        exists = conn.execute(
+            "SELECT 1 FROM users WHERE telegram_id = ?",
+            (user_id,),
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            """
+            INSERT INTO user_suspensions (user_id, reason, created_by)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                reason = excluded.reason,
+                created_by = excluded.created_by,
+                created_at = datetime('now'),
+                lifted_at = NULL
+            """,
+            (user_id, normalized, admin_id),
+        )
+        conn.execute(
+            "UPDATE intents SET visible = 0 WHERE user_id = ?",
+            (user_id,),
+        )
+        conn.execute(
+            "UPDATE requests SET status = 'rejected' "
+            "WHERE status = 'pending' AND (from_user = ? OR to_user = ?)",
+            (user_id, user_id),
+        )
+        group_ids = [
+            row["group_id"]
+            for row in conn.execute(
+                "SELECT group_id FROM event_group_members WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        ]
+        for group_id in group_ids:
+            _leave_event_group_in_connection(conn, group_id, user_id)
+        return True
+
+
+def lift_user_suspension(user_id: int) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE user_suspensions
+            SET lifted_at = datetime('now')
+            WHERE user_id = ? AND lifted_at IS NULL
+            """,
+            (user_id,),
+        )
+    return cursor.rowcount > 0
+
+
+def delete_user_data(user_id: int) -> bool:
+    """Delete a user's profile, activity and company data in one transaction."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        exists = conn.execute(
+            """
+            SELECT 1 FROM users WHERE telegram_id = ?
+            UNION SELECT 1 FROM usage_events WHERE user_id = ?
+            UNION SELECT 1 FROM feedback_messages WHERE user_id = ?
+            UNION SELECT 1 FROM user_acquisition WHERE user_id = ?
+            LIMIT 1
+            """,
+            (user_id, user_id, user_id, user_id),
+        ).fetchone()
+        group_ids = [
+            row["group_id"]
+            for row in conn.execute(
+                "SELECT group_id FROM event_group_members WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        ]
+        for group_id in group_ids:
+            _leave_event_group_in_connection(conn, group_id, user_id)
+        conn.execute("DELETE FROM requests WHERE from_user = ? OR to_user = ?", (user_id, user_id))
+        conn.execute("DELETE FROM blocks WHERE blocker = ? OR blocked = ?", (user_id, user_id))
+        conn.execute("DELETE FROM intents WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM usage_events WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM feedback_messages WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM inactivity_feedback_prompts WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM event_group_deliveries WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM event_experience_feedback WHERE user_id = ?", (user_id,))
+        conn.execute(
+            "DELETE FROM user_reports WHERE reporter_id = ? OR reported_id = ?",
+            (user_id, user_id),
+        )
+        conn.execute("DELETE FROM user_acquisition WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM admin_report_deliveries WHERE admin_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE telegram_id = ?", (user_id,))
+        return exists is not None
 
 
 def format_request_notification(request: ConnectionRequest) -> str:

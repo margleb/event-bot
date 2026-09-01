@@ -1,9 +1,11 @@
 import os
 import sys
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import perf_counter
 
-from event_bot.db import init_db, upsert_source_events
+from event_bot.db import init_db, record_source_sync_run, upsert_source_events
 from dotenv import load_dotenv
 
 from event_bot.sources import (
@@ -22,6 +24,7 @@ class ImportStats:
     skipped: int = 0
     errors: int = 0
     elapsed: float = 0.0
+    fetched: int = 0
 
     def format(self) -> str:
         return (
@@ -38,6 +41,7 @@ def run_import(source: EventSource | None = None) -> ImportStats:
     stats = ImportStats()
 
     raw_events = source.fetch()
+    stats.fetched = len(raw_events)
     events = []
     for raw in raw_events:
         if not isinstance(raw, dict):
@@ -79,25 +83,85 @@ def configured_sources() -> list[EventSource]:
 
 def main() -> None:
     load_dotenv()
+    init_db()
     failed = False
+    failures: list[tuple[str, str]] = []
     for source in configured_sources():
         started = perf_counter()
+        started_at = datetime.now(timezone.utc)
         try:
             stats = run_import(source)
         except SourceFetchError as error:
             failed = True
             stats = ImportStats(errors=1, elapsed=perf_counter() - started)
+            finished_at = datetime.now(timezone.utc)
+            record_source_sync_run(
+                source.source_id,
+                "failed",
+                errors=stats.errors,
+                error_message=str(error),
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            failures.append((source.source_id, str(error)))
             print(f"{source.source_id}: импорт не выполнен: {error}", file=sys.stderr)
             print(f"{source.source_id}: {stats.format()}", file=sys.stderr)
             continue
         except Exception as error:
             failed = True
             stats = ImportStats(errors=1, elapsed=perf_counter() - started)
+            finished_at = datetime.now(timezone.utc)
+            record_source_sync_run(
+                source.source_id,
+                "failed",
+                errors=stats.errors,
+                error_message=str(error),
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            failures.append((source.source_id, str(error)))
             print(f"{source.source_id}: импорт не выполнен: {error}", file=sys.stderr)
             print(f"{source.source_id}: {stats.format()}", file=sys.stderr)
             continue
+        finished_at = datetime.now(timezone.utc)
+        record_source_sync_run(
+            source.source_id,
+            "warning" if stats.errors else "success",
+            added=stats.added,
+            updated=stats.updated,
+            skipped=stats.skipped,
+            errors=stats.errors,
+            fetched=stats.fetched,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
         print(f"{source.source_id}: {stats.format()}")
+    if failures:
+        asyncio.run(_notify_import_failures(failures))
     raise SystemExit(1 if failed else 0)
+
+
+async def _notify_import_failures(failures: list[tuple[str, str]]) -> None:
+    """Send one compact operational alert instead of silently losing the catalog."""
+    from aiogram import Bot
+    from event_bot.analytics import get_admin_ids
+
+    token = os.getenv("BOT_TOKEN", "").strip()
+    admin_ids = get_admin_ids()
+    if not token or not admin_ids:
+        return
+    text = "⚠️ Сбой импорта афиши:\n" + "\n".join(
+        f"• {source_id}: {message[:300]}" for source_id, message in failures
+    )
+    bot = Bot(token=token)
+    try:
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:
+                pass
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":

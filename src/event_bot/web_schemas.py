@@ -26,8 +26,8 @@ class ProfileUpdate(BaseModel):
     avoid: list[str] = Field(default_factory=list, max_length=12)
     days: list[str] = Field(default_factory=list, max_length=7)
     budget_rub: int | None = Field(default=None, ge=0, le=1_000_000)
-    preferred_group_size_min: int | None = Field(default=None, ge=1, le=100)
-    preferred_group_size_max: int | None = Field(default=None, ge=1, le=100)
+    preferred_group_size_min: int | None = Field(default=None, ge=2, le=5)
+    preferred_group_size_max: int | None = Field(default=None, ge=2, le=5)
     digest_weekday: int | None = Field(default=None, ge=0, le=6)
 
     @field_validator("interests", "avoid")
@@ -96,6 +96,16 @@ class MeetingPointUpdate(BaseModel):
     @field_validator("meeting_point")
     @classmethod
     def normalize_meeting_point(cls, value: str) -> str:
+        return " ".join(value.strip().split())
+
+
+class UserReportCreate(BaseModel):
+    reason: Literal["spam", "harassment", "unsafe", "other"]
+    details: str = Field(default="", max_length=1000)
+
+    @field_validator("details")
+    @classmethod
+    def normalize_details(cls, value: str) -> str:
         return " ".join(value.strip().split())
 
 

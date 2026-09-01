@@ -14,8 +14,8 @@
   ];
   const BUDGETS = [[null, "Любой"], [0, "Бесплатно"], [1000, "до 1 000 ₽"], [3000, "до 3 000 ₽"], [5000, "до 5 000 ₽"]];
   const GROUPS = [
-    [null, null, "Неважно"], [1, 1, "Самостоятельно"], [2, 2, "Вдвоём"],
-    [3, 5, "3–5 человек"], [6, 10, "6–10 человек"],
+    [null, null, "Неважно"], [2, 2, "2 человека"], [3, 3, "3 человека"],
+    [4, 4, "4 человека"], [5, 5, "5 человек"],
   ];
   const MONTHS = ["ЯНВ", "ФЕВ", "МАР", "АПР", "МАЙ", "ИЮН", "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК"];
   const LONG_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
@@ -396,6 +396,14 @@
     return "";
   }
 
+  function groupSafetyActions(member, groupId) {
+    if (member.is_me || !member.member_key) return "";
+    return `<div class="member-safety">
+      <button type="button" data-event-report="${escapeHtml(member.member_key)}" data-group-id="${groupId}">Пожаловаться</button>
+      <button type="button" data-event-block="${escapeHtml(member.member_key)}" data-group-id="${groupId}">Заблокировать</button>
+    </div>`;
+  }
+
   function groupChat(group) {
     const messages = (group.messages || []).map((message) => `
       <article class="chat-message ${message.is_me ? "me" : ""}">
@@ -466,6 +474,7 @@
             <h4>${escapeHtml(member.name)}</h4>
             <p>${common ? `Общее: ${escapeHtml(common)}` : "Идёт на это же событие"} · ${member.rsvp === "going" ? "идёт" : "не сможет"}</p>
             ${ready ? groupConnectionActions(member, group.id) : ""}
+            ${ready ? groupSafetyActions(member, group.id) : ""}
           </div>
         </article>`;
     }).join("");
@@ -628,6 +637,18 @@
       metricCard("Активных дней", formatNumber(summary.active_days_per_user, 1), "в среднем на человека", "compact"),
     ].join("");
 
+    const funnel = data.funnel || [];
+    const funnelMax = Math.max(1, ...funnel.map((item) => item.users));
+    $("#admin-funnel").innerHTML = funnel.length
+      ? funnel.map((item) => analyticsBar(item.label, item.users, funnelMax, `${formatNumber(item.conversion, 1)}% от пришедших`)).join("")
+      : `<div class="analytics-empty">Новых пользователей за период нет.</div>`;
+
+    const campaigns = data.campaigns || [];
+    const campaignMax = Math.max(1, ...campaigns.map((item) => item.users));
+    $("#admin-campaigns").innerHTML = campaigns.length
+      ? campaigns.map((item) => analyticsBar(item.campaign, item.users, campaignMax, `${item.opened_app} открыли · ${item.profiled} профилей · ${item.searched_company} искали компанию`)).join("")
+      : `<div class="analytics-empty">Для атрибуции используйте ссылки вида <b>t.me/MskMeetupBot?start=club_singles</b>.</div>`;
+
     const frequencyItems = [
       ["Один день", data.frequency.one_day],
       ["2–3 дня", data.frequency.two_three_days],
@@ -656,6 +677,21 @@
     $("#admin-sources").innerHTML = data.sources.length
       ? data.sources.map((item) => analyticsBar(item.label, item.amount, sourceMax, `${item.users} польз.`)).join("")
       : `<div class="analytics-empty">Данных по каналам пока нет.</div>`;
+    const outcomes = data.company_outcomes || [];
+    const outcomeMax = Math.max(1, ...outcomes.map((item) => item.amount));
+    $("#admin-company-outcomes").innerHTML = outcomes.length
+      ? outcomes.map((item) => analyticsBar(item.label, item.amount, outcomeMax, "ответов")).join("")
+      : `<div class="analytics-empty">Ответы появятся после завершённых мероприятий.</div>`;
+    const reports = data.reports || { total: 0, new: 0 };
+    $("#admin-reports").textContent = `${formatNumber(reports.total)} жалоб · ${formatNumber(reports.new)} новых`;
+    const sourceHealthLabels = { success: "в норме", warning: "есть ошибки", failed: "сбой", stale: "давно не обновлялся", unknown: "нет данных" };
+    const sourceHealth = data.source_health || [];
+    $("#admin-source-health").innerHTML = sourceHealth.length
+      ? sourceHealth.map((item) => {
+          const when = item.finished_at ? new Date(`${item.finished_at.replace(" ", "T")}Z`).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "никогда";
+          return `<div class="source-health-row ${escapeHtml(item.health)}"><div><span><b>${escapeHtml(item.source_id)}</b> · ${escapeHtml(sourceHealthLabels[item.health] || item.health)}</span><small>Обновлено: ${escapeHtml(when)} · активных событий: ${formatNumber(item.active_events)} · ошибок: ${formatNumber(item.errors)}</small></div><i></i></div>`;
+        }).join("")
+      : `<div class="analytics-empty">Импорты ещё не запускались.</div>`;
     renderAdminChart();
   }
 
@@ -842,8 +878,83 @@
     if (!tg?.initData) { toast("В режиме просмотра ответ не сохраняется"); return; }
     try {
       const result = await api(`/event-groups/${groupId}/rsvp`, { method: "PUT", body: JSON.stringify({ status }) });
-      mergeEventGroup(result.event_group); haptic(); toast("Ответ сохранён");
+      if (result.status === "left") {
+        state.data.event_groups = (state.data.event_groups || []).filter((item) => item.id !== groupId);
+        state.selectedEventGroupId = state.data.event_groups[0]?.id || null;
+        state.groupDetailOpen = false;
+        renderFeed(); renderMy(); renderGroup();
+        haptic(); toast("Вы вышли из компании, место освобождено");
+        return;
+      }
+      mergeEventGroup(result.event_group); haptic(); toast("Участие подтверждено");
     } catch (error) { toast(error.message); }
+  }
+
+  async function submitMemberReport(groupId, memberKey, reason) {
+    if (!tg?.initData) { toast("В режиме просмотра жалоба не отправляется"); return; }
+    try {
+      await api(`/event-groups/${groupId}/members/${encodeURIComponent(memberKey)}/report`, {
+        method: "POST", body: JSON.stringify({ reason }),
+      });
+      haptic("medium"); toast("Жалоба передана администратору");
+    } catch (error) { toast(error.message); }
+  }
+
+  function reportEventMember(groupId, memberKey) {
+    const submit = (reason) => void submitMemberReport(groupId, memberKey, reason);
+    if (tg?.showPopup) {
+      tg.showPopup({
+        title: "Причина жалобы",
+        message: "Администратор проверит обращение. Другой участник не увидит, кто подал жалобу.",
+        buttons: [
+          { id: "harassment", type: "default", text: "Оскорбления" },
+          { id: "unsafe", type: "destructive", text: "Небезопасное поведение" },
+          { id: "spam", type: "default", text: "Спам" },
+        ],
+      }, (buttonId) => { if (buttonId) submit(buttonId); });
+      return;
+    }
+    if (window.confirm("Отправить жалобу администратору?")) submit("other");
+  }
+
+  function blockEventMember(groupId, memberKey) {
+    const proceed = async (confirmed) => {
+      if (!confirmed) return;
+      if (!tg?.initData) { toast("В режиме просмотра блокировка не сохраняется"); return; }
+      try {
+        await api(`/event-groups/${groupId}/members/${encodeURIComponent(memberKey)}/block`, { method: "POST" });
+        state.data.event_groups = (state.data.event_groups || []).filter((item) => item.id !== groupId);
+        state.selectedEventGroupId = state.data.event_groups[0]?.id || null;
+        state.groupDetailOpen = false;
+        renderFeed(); renderMy(); renderGroup();
+        haptic("medium"); toast("Пользователь заблокирован. Вы больше не будете в одной компании.");
+      } catch (error) { toast(error.message); }
+    };
+    const message = "Вы выйдете из этой компании, а этот пользователь больше не будет подбираться вам.";
+    if (tg?.showConfirm) tg.showConfirm(message, proceed);
+    else void proceed(window.confirm(message));
+  }
+
+  function openInfoPage(page) {
+    const url = `${window.location.origin}/r/${page}`;
+    if (tg?.openLink) tg.openLink(url);
+    else window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  function deleteAccount() {
+    const proceed = async (confirmed) => {
+      if (!confirmed) return;
+      if (!tg?.initData) { toast("В режиме просмотра данные не удаляются"); return; }
+      try {
+        await api("/account", { method: "DELETE" });
+        haptic("medium");
+        document.querySelector("main").innerHTML = `<section class="deleted-account"><h1>Данные удалены</h1><p>Профиль, история и компании удалены. При следующем запуске можно создать новый профиль.</p></section>`;
+        $("#bottom-nav")?.classList.add("hidden");
+      } catch (error) { toast(error.message); }
+    };
+    const message = "Удалить профиль, историю, сообщения и все связи? Это действие нельзя отменить.";
+    if (tg?.showConfirm) tg.showConfirm(message, proceed);
+    else void proceed(window.confirm(message));
   }
 
   async function sendMeetingPoint(event) {
@@ -1057,6 +1168,14 @@
       if (connect) void requestEventContact(Number(connect.dataset.groupId), connect.dataset.eventConnect);
       const connectionResponse = event.target.closest("[data-event-connection-action]");
       if (connectionResponse) void respondEventContact(Number(connectionResponse.dataset.groupId), Number(connectionResponse.dataset.requestId), connectionResponse.dataset.eventConnectionAction);
+      const reportMember = event.target.closest("[data-event-report]");
+      if (reportMember) reportEventMember(Number(reportMember.dataset.groupId), reportMember.dataset.eventReport);
+      const blockMember = event.target.closest("[data-event-block]");
+      if (blockMember) blockEventMember(Number(blockMember.dataset.groupId), blockMember.dataset.eventBlock);
+      const privacy = event.target.closest("[data-open-privacy]");
+      if (privacy) openInfoPage("privacy");
+      const rules = event.target.closest("[data-open-rules]");
+      if (rules) openInfoPage("rules");
       const source = event.target.closest("#modal-source");
       if (source) trackMiniapp("external_source");
       const profileSection = event.target.closest("[data-profile-section]");
@@ -1102,6 +1221,7 @@
     $("#custom-interest").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); addInterest(); } });
     $("#profile-form").addEventListener("submit", saveProfile);
     $("#send-feedback").addEventListener("click", sendFeedback);
+    $("#delete-account").addEventListener("click", deleteAccount);
     $("#profile-editor-back").addEventListener("click", () => { state.profileEditorOpen = false; renderProfile(); window.scrollTo({ top: 0, behavior: "smooth" }); });
     $("#feed-filters").addEventListener("click", (event) => {
       const button = event.target.closest("[data-category]"); if (!button) return;
