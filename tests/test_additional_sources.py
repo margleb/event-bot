@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 
+import pytest
+
 from event_bot.import_events import configured_sources
+from event_bot.sources.base import SourceFetchError
 from event_bot.sources.ticketmaster import TicketmasterSource
 from event_bot.sources.timepad import TIMEPAD_FIELDS, TIMEPAD_USER_AGENT, TimepadSource
 
@@ -44,7 +47,82 @@ def test_timepad_fetch_uses_token_and_documented_filters():
     assert query["cities"] == ["Москва"]
     assert query["limit"] == ["100"]
     assert query["fields"] == [",".join(TIMEPAD_FIELDS)]
+    assert query["sort"] == ["+starts_at,+id"]
     assert "starts_at_min" in query and "starts_at_max" in query
+
+
+def test_timepad_fetch_accepts_string_total_and_stops_on_full_last_page():
+    calls: list[Request] = []
+    sleeps: list[float] = []
+
+    def opener(request: Request, *, timeout: float):
+        calls.append(request)
+        skip = int(parse_qs(urlparse(request.full_url).query)["skip"][0])
+        return JsonResponse(
+            {
+                "total": "200",
+                "values": [{"id": item} for item in range(skip, skip + 100)],
+            }
+        )
+
+    source = TimepadSource(
+        "token",
+        now=datetime(2026, 8, 29, 9, tzinfo=timezone.utc),
+        opener=opener,
+        sleeper=sleeps.append,
+    )
+
+    records = source.fetch()
+
+    assert len(records) == 200
+    assert len(calls) == 2
+    assert sleeps == [0.2]
+
+
+def test_timepad_fetch_supports_more_than_one_hundred_pages():
+    calls = 0
+    total = 10_100
+
+    def opener(request: Request, *, timeout: float):
+        nonlocal calls
+        calls += 1
+        skip = int(parse_qs(urlparse(request.full_url).query)["skip"][0])
+        count = min(100, total - skip)
+        return JsonResponse(
+            {
+                "total": total,
+                "values": [{"id": item} for item in range(skip, skip + count)],
+            }
+        )
+
+    source = TimepadSource(
+        "token",
+        now=datetime(2026, 8, 29, 9, tzinfo=timezone.utc),
+        opener=opener,
+        sleeper=lambda _: None,
+    )
+
+    records = source.fetch()
+
+    assert len(records) == total
+    assert calls == 101
+
+
+def test_timepad_fetch_rejects_repeated_page():
+    def opener(request: Request, *, timeout: float):
+        return JsonResponse(
+            {"total": 300, "values": [{"id": item} for item in range(100)]}
+        )
+
+    source = TimepadSource(
+        "token",
+        now=datetime(2026, 8, 29, 9, tzinfo=timezone.utc),
+        opener=opener,
+        sleeper=lambda _: None,
+    )
+
+    with pytest.raises(SourceFetchError, match="повторил страницу"):
+        source.fetch()
 
 
 def test_timepad_normalizes_event_and_strips_html():

@@ -24,13 +24,14 @@ TIMEPAD_FIELDS = (
     "ends_at",
     "name",
     "description_short",
-    "description_html",
     "url",
     "location",
     "organization",
     "categories",
     "registration_data",
 )
+TIMEPAD_PAGE_SIZE = 100
+TIMEPAD_MAX_PAGES = 500
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -102,34 +103,62 @@ class TimepadSource(EventSource):
 
     def fetch(self) -> list[Any]:
         until = self.now + timedelta(days=30)
-        page_size = 100
         base_params: dict[str, str | int] = {
             "fields": ",".join(TIMEPAD_FIELDS),
-            "limit": page_size,
+            "limit": TIMEPAD_PAGE_SIZE,
             "cities": "Москва",
             "starts_at_min": self.now.isoformat(timespec="seconds"),
             "starts_at_max": until.isoformat(timespec="seconds"),
-            "sort": "+starts_at",
+            # starts_at keeps the date-range query fast; id makes pagination
+            # deterministic when many events have the same start time.
+            "sort": "+starts_at,+id",
         }
         records: list[Any] = []
+        seen_pages: set[tuple[object, ...]] = set()
         skip = 0
-        for _ in range(100):
+        for _ in range(TIMEPAD_MAX_PAGES):
             url = f"{TIMEPAD_EVENTS_URL}?{urlencode({**base_params, 'skip': skip})}"
             payload = self._request_page(url)
             values = payload.get("values")
             if not isinstance(values, list):
                 raise SourceFetchError("Timepad не вернул список values")
+
+            # An ignored skip would otherwise make a large import loop forever.
+            page_signature = tuple(
+                item.get("id") if isinstance(item, dict) else repr(item)
+                for item in values
+            )
+            if values and page_signature in seen_pages:
+                raise SourceFetchError(
+                    "Timepad повторил страницу при постраничной загрузке"
+                )
+            if values:
+                seen_pages.add(page_signature)
+
             records.extend(values)
-            total = payload.get("total")
             skip += len(values)
-            if not values or len(values) < page_size:
+            total = self._parse_total(payload.get("total"))
+            if not values or len(values) < TIMEPAD_PAGE_SIZE:
                 break
-            if isinstance(total, int) and skip >= total:
+            if total is not None and skip >= total:
                 break
             self.sleeper(self.page_pause)
         else:
-            raise SourceFetchError("Timepad вернул больше 100 страниц")
+            raise SourceFetchError(
+                f"Timepad вернул больше {TIMEPAD_MAX_PAGES} страниц"
+            )
         return records
+
+    @staticmethod
+    def _parse_total(value: object) -> int | None:
+        """Accept both documented integer and legacy numeric-string totals."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) and value >= 0:
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return None
 
     @staticmethod
     def _plain_text(value: object) -> str:
