@@ -50,7 +50,7 @@ async def test_company_reminder_and_experience_prompt_are_sent_once(
     monkeypatch,
 ):
     monkeypatch.setenv("MINIAPP_URL", "https://bot.example/r/app?build=1")
-    current = datetime(2026, 8, 31, 12, tzinfo=ZoneInfo("Europe/Moscow"))
+    current = datetime.now(ZoneInfo("Europe/Moscow")).replace(microsecond=0)
     event_id = event_factory(
         title="Кино с компанией",
         date=current.replace(tzinfo=None) + timedelta(hours=12),

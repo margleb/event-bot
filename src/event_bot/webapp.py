@@ -69,6 +69,7 @@ from event_bot.embedding_provider import (
     profile_embedding_text,
     vector_to_blob,
 )
+from event_bot.keyboards import miniapp_keyboard, miniapp_tab_url
 from event_bot.models import Event, Profile, UserIntent, format_group_size
 from event_bot.source_branding import source_brand
 from event_bot.web_auth import (
@@ -417,18 +418,24 @@ async def _notify_event_company(
     bot = Bot(token=os.environ["BOT_TOKEN"])
     delivered = 0
     miniapp_url = os.getenv("MINIAPP_URL", "").strip()
-    separator = "&" if "?" in miniapp_url else "?"
-    suffix = (
-        f"\n\nОткрыть компанию: {miniapp_url}{separator}tab=group"
+    reply_markup = (
+        miniapp_keyboard(
+            miniapp_tab_url(miniapp_url, "group"),
+            "👥 Открыть компанию",
+        )
         if miniapp_url
-        else ""
+        else None
     )
     try:
         for member_id in user_ids:
             if member_id == exclude_user_id:
                 continue
             try:
-                await bot.send_message(member_id, f"{text}{suffix}")
+                await bot.send_message(
+                    member_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
                 delivered += 1
             except Exception:
                 logger.warning(

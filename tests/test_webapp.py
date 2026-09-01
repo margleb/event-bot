@@ -2,9 +2,11 @@ import hashlib
 import hmac
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlencode
 
+import pytest
 from fastapi.testclient import TestClient
 
 from event_bot.analytics import build_admin_report, get_recent_feedback
@@ -97,6 +99,37 @@ def test_miniapp_html_is_never_cached(temp_db):
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
     assert response.headers["pragma"] == "no-cache"
+
+
+@pytest.mark.asyncio
+async def test_company_notification_uses_telegram_miniapp_button(monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
+    monkeypatch.setenv(
+        "MINIAPP_URL",
+        "https://bot.example/r/app?build=42",
+    )
+    bot = SimpleNamespace(
+        send_message=AsyncMock(),
+        session=SimpleNamespace(close=AsyncMock()),
+    )
+    monkeypatch.setattr(webapp_module, "Bot", lambda token: bot)
+
+    delivered = await webapp_module._notify_event_company(
+        [42, 43],
+        "Компания собрана",
+    )
+
+    assert delivered == 2
+    assert bot.send_message.await_count == 2
+    for call in bot.send_message.await_args_list:
+        assert call.args[1] == "Компания собрана"
+        assert "https://" not in call.args[1]
+        button = call.kwargs["reply_markup"].inline_keyboard[0][0]
+        assert button.text == "👥 Открыть компанию"
+        assert button.web_app.url == (
+            "https://bot.example/r/app?build=42&tab=group"
+        )
+    bot.session.close.assert_awaited_once()
 
 
 def test_profile_bootstrap_and_schedule(temp_db, monkeypatch):
