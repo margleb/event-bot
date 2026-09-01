@@ -2,6 +2,8 @@
   "use strict";
 
   const tg = window.Telegram?.WebApp;
+  const researchSessionId = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
   const DAYS = [
     ["mon", "Пн"], ["tue", "Вт"], ["wed", "Ср"], ["thu", "Чт"],
     ["fri", "Пт"], ["sat", "Сб"], ["sun", "Вс"],
@@ -25,6 +27,20 @@
     kudago: { name: "KudaGo", mark: "K" },
     timepad: { name: "timepad", mark: "tp" },
     ticketmaster: { name: "Ticketmaster", mark: "★" },
+  };
+  const RESEARCH_EVENT_LABELS = {
+    "miniapp.open": "открыл Mini App",
+    "miniapp.profile_saved": "сохранил профиль",
+    "miniapp.event_details": "открыл мероприятие",
+    "miniapp.company_prompt_opened": "открыл поиск компании",
+    "miniapp.event_company.joined": "запустил поиск компании",
+    "miniapp.group_details": "открыл компанию",
+    "miniapp.profile_editor_opened": "открыл настройки профиля",
+    "miniapp.profile_validation_failed": "не смог сохранить профиль",
+    "miniapp.tab.feed": "вернулся в афишу",
+    "miniapp.tab.my": "открыл свои события",
+    "miniapp.tab.group": "открыл раздел компаний",
+    "miniapp.tab.profile": "открыл профиль",
   };
   const EVENT_IMAGES = {
     "Концерты": "https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?w=900&h=520&fit=crop&auto=format",
@@ -105,6 +121,12 @@
         { label: "Mini App", amount: 287, users: 34 },
         { label: "Telegram-бот", amount: 141, users: 27 },
       ],
+      research_campaigns: [
+        {
+          campaign: "ux_unu_sep2026", participants: 5, completed: 2,
+          sessions: 7, last_activity: new Date().toISOString(),
+        },
+      ],
       feedback: { total: 5, new: 1 },
       inactivity_feedback: {
         prompts_sent: 18, responses: 12, response_rate: 66.7,
@@ -115,6 +137,36 @@
           { code: "other", label: "Другое", amount: 1 },
         ],
       },
+    };
+  }
+
+  function localResearchPreview(campaign) {
+    const stages = [
+      ["enrolled", "Получили код", 5],
+      ["opened_app", "Открыли Mini App", 5],
+      ["profiled", "Сохранили профиль", 4],
+      ["event_opened", "Открыли мероприятие", 4],
+      ["company_prompt", "Открыли поиск компании", 3],
+      ["joined_company", "Запустили поиск", 2],
+      ["group_opened", "Открыли компанию", 2],
+    ];
+    return {
+      campaign,
+      summary: {
+        participants: 5, sessions: 7, completed: 2,
+        completion_rate: 40, median_session_seconds: 184,
+      },
+      funnel: stages.map(([stage, label, users]) => ({
+        stage, label, users, conversion: users * 20,
+      })),
+      participants: [
+        { participant_code: "UX-7MK9QP", sessions: 2, events: 17, duration_seconds: 412, completed: true, last_event: "miniapp.group_details" },
+        { participant_code: "UX-BR4X2N", sessions: 1, events: 11, duration_seconds: 205, completed: true, last_event: "miniapp.group_details" },
+        { participant_code: "UX-K8WD3H", sessions: 1, events: 8, duration_seconds: 148, completed: false, last_event: "miniapp.company_prompt_opened" },
+        { participant_code: "UX-P2FM6Y", sessions: 2, events: 6, duration_seconds: 126, completed: false, last_event: "miniapp.event_details" },
+        { participant_code: "UX-T9CA5R", sessions: 1, events: 2, duration_seconds: 29, completed: false, last_event: "miniapp.open" },
+      ],
+      top_events: [],
     };
   }
 
@@ -136,8 +188,12 @@
     adminDays: 30,
     adminMetric: "active_users",
     adminLoading: false,
+    researchCampaign: null,
+    researchData: null,
+    researchLoading: false,
   };
   let groupPollTimer = null;
+  let researchHeartbeatTimer = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -152,6 +208,7 @@
       headers: {
         "Content-Type": "application/json",
         "X-Telegram-Init-Data": tg?.initData || "",
+        "X-Research-Session": researchSessionId,
         ...(options.headers || {}),
       },
     });
@@ -166,12 +223,23 @@
     return body;
   }
 
-  function trackMiniapp(event) {
+  function trackMiniapp(event, metadata = {}) {
     if (!tg?.initData) return;
     void api("/track", {
       method: "POST",
-      body: JSON.stringify({ event }),
+      body: JSON.stringify({ event, metadata }),
     }).catch(() => {});
+  }
+
+  function startResearchHeartbeat() {
+    clearInterval(researchHeartbeatTimer);
+    if (!state.data?.research) return;
+    const ping = () => trackMiniapp("session_heartbeat", {
+      tab: state.tab || "loading",
+      status: document.visibilityState,
+    });
+    researchHeartbeatTimer = setInterval(ping, 15000);
+    document.addEventListener("visibilitychange", ping);
   }
 
   function escapeHtml(value) {
@@ -617,6 +685,117 @@
       </div>`;
   }
 
+  function formatDuration(seconds) {
+    const value = Math.max(0, Number(seconds || 0));
+    if (value < 60) return `${value} сек`;
+    const minutes = Math.floor(value / 60);
+    const rest = value % 60;
+    return rest ? `${minutes} мин ${rest} сек` : `${minutes} мин`;
+  }
+
+  function researchEventLabel(eventName) {
+    return RESEARCH_EVENT_LABELS[eventName] || eventName || "не открыл приложение";
+  }
+
+  function renderResearchDashboard() {
+    const campaigns = state.adminData?.research_campaigns || [];
+    const select = $("#admin-research-campaign");
+    const controls = $("#admin-research-controls");
+    const empty = $("#admin-research-empty");
+    if (!campaigns.length) {
+      controls.classList.add("hidden");
+      empty.classList.remove("hidden");
+      $("#admin-research-summary").innerHTML = "";
+      $("#admin-research-funnel").innerHTML = "";
+      $("#admin-research-participants").innerHTML = "";
+      return;
+    }
+    controls.classList.remove("hidden");
+    empty.classList.add("hidden");
+    if (!campaigns.some((item) => item.campaign === state.researchCampaign)) {
+      state.researchCampaign = campaigns[0].campaign;
+      state.researchData = null;
+    }
+    select.innerHTML = campaigns.map((item) => (
+      `<option value="${escapeHtml(item.campaign)}">${escapeHtml(item.campaign)} · ${formatNumber(item.participants)} чел.</option>`
+    )).join("");
+    select.value = state.researchCampaign;
+    const data = state.researchData;
+    if (!data || data.campaign !== state.researchCampaign) {
+      $("#admin-research-summary").innerHTML = `<div class="analytics-empty">Загружаем прохождения…</div>`;
+      $("#admin-research-funnel").innerHTML = "";
+      $("#admin-research-participants").innerHTML = "";
+      return;
+    }
+    const summary = data.summary;
+    $("#admin-research-summary").innerHTML = [
+      metricCard("Участники", formatNumber(summary.participants), `${formatNumber(summary.sessions)} сессий`, "compact"),
+      metricCard("Завершили", `${formatNumber(summary.completion_rate, 1)}%`, `${formatNumber(summary.completed)} из ${formatNumber(summary.participants)}`, "compact"),
+      metricCard("Медиана сессии", formatDuration(summary.median_session_seconds), "от открытия до последнего действия", "compact"),
+    ].join("");
+    const funnelMax = Math.max(1, ...data.funnel.map((item) => item.users));
+    $("#admin-research-funnel").innerHTML = data.funnel.map((item) => (
+      analyticsBar(item.label, item.users, funnelMax, `${formatNumber(item.conversion, 1)}% участников`)
+    )).join("");
+    $("#admin-research-participants").innerHTML = data.participants.length
+      ? data.participants.map((item) => `
+          <div class="research-participant ${item.completed ? "completed" : ""}">
+            <div><b>${escapeHtml(item.participant_code)}</b><span>${item.completed ? "Сценарий завершён" : "Последнее действие: " + escapeHtml(researchEventLabel(item.last_event))}</span></div>
+            <small>${formatNumber(item.sessions)} сесс. · ${formatNumber(item.events)} действий · ${formatDuration(item.duration_seconds)}</small>
+          </div>`).join("")
+      : `<div class="analytics-empty">Участники ещё не начали прохождение.</div>`;
+  }
+
+  async function loadResearchAnalytics(force = false) {
+    if (!state.data?.is_admin || !state.researchCampaign || state.researchLoading) return;
+    if (!force && state.researchData?.campaign === state.researchCampaign) {
+      renderResearchDashboard();
+      return;
+    }
+    state.researchLoading = true;
+    renderResearchDashboard();
+    try {
+      const isPreview = !tg?.initData && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+      state.researchData = isPreview
+        ? localResearchPreview(state.researchCampaign)
+        : await api(`/admin/research?campaign=${encodeURIComponent(state.researchCampaign)}`);
+    } catch (error) {
+      $("#admin-research-summary").innerHTML = `<div class="analytics-empty">${escapeHtml(error.message)}</div>`;
+    } finally {
+      state.researchLoading = false;
+      renderResearchDashboard();
+    }
+  }
+
+  async function downloadResearchCsv() {
+    if (!state.researchCampaign) return;
+    const button = $("#admin-research-export");
+    button.disabled = true;
+    try {
+      const response = await fetch(`/r/api/admin/research/export?campaign=${encodeURIComponent(state.researchCampaign)}`, {
+        headers: {
+          "X-Telegram-Init-Data": tg?.initData || "",
+          "X-Research-Session": researchSessionId,
+        },
+      });
+      if (!response.ok) throw new Error("Не удалось сформировать CSV");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${state.researchCampaign}-research-events.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast("CSV сформирован");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   function renderAdminDashboard() {
     const data = state.adminData;
     if (!data) return;
@@ -648,6 +827,7 @@
     $("#admin-campaigns").innerHTML = campaigns.length
       ? campaigns.map((item) => analyticsBar(item.campaign, item.users, campaignMax, `${item.opened_app} открыли · ${item.profiled} профилей · ${item.searched_company} искали компанию`)).join("")
       : `<div class="analytics-empty">Для атрибуции используйте ссылки вида <b>t.me/MskMeetupBot?start=club_singles</b>.</div>`;
+    renderResearchDashboard();
 
     const frequencyItems = [
       ["Один день", data.frequency.one_day],
@@ -699,6 +879,7 @@
     if (!state.data?.is_admin || state.adminLoading) return;
     if (state.adminData && !force && state.adminData.days === state.adminDays) {
       renderAdminDashboard();
+      void loadResearchAnalytics();
       return;
     }
     state.adminLoading = true;
@@ -708,6 +889,7 @@
       const isPreview = !tg?.initData && ["localhost", "127.0.0.1"].includes(window.location.hostname);
       state.adminData = isPreview ? localAdminPreview(state.adminDays) : await api(`/admin/analytics?days=${state.adminDays}`);
       renderAdminDashboard();
+      void loadResearchAnalytics();
     } catch (error) {
       $("#admin-updated").textContent = error.message || "Не удалось загрузить аналитику";
     } finally {
@@ -728,7 +910,7 @@
     if (tab === "group") renderGroup();
     if (tab === "profile") renderProfile();
     if (tab === "admin") void loadAdminAnalytics();
-    trackMiniapp(`tab.${tab}`);
+    trackMiniapp(`tab.${tab}`, { tab });
     clearInterval(groupPollTimer);
     groupPollTimer = tab === "group" && tg?.initData
       ? setInterval(() => void refreshGroup(true), 15000)
@@ -816,6 +998,10 @@
     $("#company-modal").classList.remove("hidden");
     document.body.style.overflow = "hidden";
     tg?.BackButton?.show();
+    trackMiniapp("company_prompt_opened", {
+      event_id: event.id,
+      company_count: Number(event.company_count || 0),
+    });
   }
 
   function closeCompanyModal() {
@@ -844,6 +1030,11 @@
       closeCompanyModal();
       haptic("medium");
       setTab("group");
+      trackMiniapp("group_details", {
+        group_id: result.event_group.id,
+        event_id: eventId,
+        status: result.event_group.status,
+      });
       toast(result.event_group.status === "active" ? "Компания собрана" : "Поиск запущен");
     } catch (error) { toast(error.message); }
     finally { button.disabled = false; }
@@ -853,6 +1044,12 @@
     state.selectedEventGroupId = Number(groupId);
     state.groupDetailOpen = true;
     setTab("group");
+    const group = (state.data.event_groups || []).find((item) => item.id === Number(groupId));
+    trackMiniapp("group_details", {
+      group_id: Number(groupId),
+      event_id: group?.event?.id || 0,
+      status: group?.status || "unknown",
+    });
   }
 
   async function leaveEventCompany(groupId) {
@@ -1036,7 +1233,11 @@
     $("#event-modal").classList.remove("hidden");
     document.body.style.overflow = "hidden";
     tg?.BackButton?.show();
-    trackMiniapp("event_details");
+    trackMiniapp("event_details", {
+      event_id: event.id,
+      source_id: event.source_id || null,
+      company_count: Number(event.company_count || 0),
+    });
   }
 
   function closeModal() {
@@ -1064,11 +1265,13 @@
     if (!state.selectedInterests.size) {
       errorBox.textContent = "Выберите хотя бы один интерес.";
       errorBox.classList.remove("hidden");
+      trackMiniapp("profile_validation_failed", { reason: "no_interests" });
       return;
     }
     if (budget !== null && (!Number.isFinite(budget) || budget < 0 || budget > 1000000)) {
       errorBox.textContent = "Проверьте указанную сумму.";
       errorBox.classList.remove("hidden");
+      trackMiniapp("profile_validation_failed", { reason: "invalid_budget" });
       return;
     }
     const button = $("#save-profile");
@@ -1092,6 +1295,7 @@
     } catch (error) {
       errorBox.textContent = error.message;
       errorBox.classList.remove("hidden");
+      trackMiniapp("profile_validation_failed", { reason: "api_error" });
     } finally {
       button.disabled = false;
       button.querySelector("span").textContent = "Сохранить и подобрать";
@@ -1157,7 +1361,18 @@
       const openCompany = event.target.closest("[data-open-company]");
       if (openCompany) openEventCompany(Number(openCompany.dataset.openCompany));
       const selectCompany = event.target.closest("[data-select-company]");
-      if (selectCompany) { state.selectedEventGroupId = Number(selectCompany.dataset.selectCompany); state.groupDetailOpen = true; haptic(); renderGroup(); }
+      if (selectCompany) {
+        state.selectedEventGroupId = Number(selectCompany.dataset.selectCompany);
+        state.groupDetailOpen = true;
+        haptic();
+        renderGroup();
+        const group = (state.data.event_groups || []).find((item) => item.id === state.selectedEventGroupId);
+        trackMiniapp("group_details", {
+          group_id: state.selectedEventGroupId,
+          event_id: group?.event?.id || 0,
+          status: group?.status || "unknown",
+        });
+      }
       const companyList = event.target.closest("[data-company-list]");
       if (companyList) { state.groupDetailOpen = false; haptic(); renderGroup(); }
       const leaveCompany = event.target.closest("[data-leave-company]");
@@ -1177,11 +1392,20 @@
       const rules = event.target.closest("[data-open-rules]");
       if (rules) openInfoPage("rules");
       const source = event.target.closest("#modal-source");
-      if (source) trackMiniapp("external_source");
+      if (source) {
+        const openedEvent = findEvent(state.modalEventId);
+        trackMiniapp("external_source", {
+          event_id: openedEvent?.id || 0,
+          source_id: openedEvent?.source_id || null,
+        });
+      }
       const profileSection = event.target.closest("[data-profile-section]");
       if (profileSection) {
         state.profileEditorOpen = true;
         renderProfile();
+        trackMiniapp("profile_editor_opened", {
+          reason: profileSection.dataset.profileSection,
+        });
         const targets = { notifications: ".digest-section", feedback: ".feedback-section" };
         const target = targets[profileSection.dataset.profileSection];
         if (target) requestAnimationFrame(() => $(target)?.scrollIntoView({ behavior: "smooth", block: "start" }));
@@ -1251,6 +1475,14 @@
     $("#admin-refresh").addEventListener("click", () => {
       haptic(); void loadAdminAnalytics(true);
     });
+    $("#admin-research-campaign").addEventListener("change", (event) => {
+      state.researchCampaign = event.target.value;
+      state.researchData = null;
+      haptic(); void loadResearchAnalytics(true);
+    });
+    $("#admin-research-export").addEventListener("click", () => {
+      haptic(); void downloadResearchCsv();
+    });
     $("#modal-close").addEventListener("click", closeModal);
     $("#modal-backdrop").addEventListener("click", closeModal);
     $("#company-modal-close").addEventListener("click", closeCompanyModal);
@@ -1286,6 +1518,7 @@
     }
     try {
       state.data = await api("/bootstrap");
+      startResearchHeartbeat();
       configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
       $("#loading").classList.add("hidden");
       $("#app").classList.remove("hidden");

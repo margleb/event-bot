@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from event_bot.analytics import EVENT_LABELS, get_admin_ids
 from event_bot.db import DB_DATETIME_FORMAT, get_connection
 from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
+from event_bot.research_analytics import list_research_campaigns
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -25,6 +26,9 @@ PASSIVE_EVENTS = (
     "miniapp.tab.profile",
     "miniapp.tab.admin",
 )
+RESEARCH_USER_FILTER = (
+    " AND user_id NOT IN (SELECT user_id FROM research_participants)"
+)
 
 
 def _utc_text(value: datetime) -> str:
@@ -39,9 +43,11 @@ def _known_users(conn, admin_ids: list[int]) -> int:
             SELECT COUNT(*) AS amount FROM (
                 SELECT telegram_id AS user_id FROM users
                 WHERE telegram_id NOT IN ({placeholders})
+                  AND telegram_id NOT IN (SELECT user_id FROM research_participants)
                 UNION
                 SELECT user_id FROM usage_events
                 WHERE user_id NOT IN ({placeholders})
+                  AND user_id NOT IN (SELECT user_id FROM research_participants)
             )
             """,
             (*admin_ids, *admin_ids),
@@ -50,8 +56,10 @@ def _known_users(conn, admin_ids: list[int]) -> int:
         """
         SELECT COUNT(*) AS amount FROM (
             SELECT telegram_id AS user_id FROM users
+            WHERE telegram_id NOT IN (SELECT user_id FROM research_participants)
             UNION
             SELECT user_id FROM usage_events
+            WHERE user_id NOT IN (SELECT user_id FROM research_participants)
         )
         """
     ).fetchone()["amount"]
@@ -84,7 +92,7 @@ def build_admin_dashboard(
         f" AND user_id NOT IN ({','.join('?' for _ in admin_ids)})"
         if admin_ids
         else ""
-    )
+    ) + RESEARCH_USER_FILTER
 
     def scalar(conn, sql: str, params: tuple[object, ...]) -> int:
         return int(conn.execute(sql, params).fetchone()["amount"] or 0)
@@ -282,7 +290,7 @@ def build_admin_dashboard(
             f" AND user_id NOT IN ({','.join('?' for _ in admin_ids)})"
             if admin_ids
             else ""
-        )
+        ) + RESEARCH_USER_FILTER
         funnel = conn.execute(
             """
             WITH cohort AS (
@@ -323,7 +331,7 @@ def build_admin_dashboard(
             f" AND ua.user_id NOT IN ({','.join('?' for _ in admin_ids)})"
             if admin_ids
             else ""
-        )
+        ) + " AND ua.user_id NOT IN (SELECT user_id FROM research_participants)"
         campaign_rows = conn.execute(
             """
             SELECT ua.campaign,
@@ -353,9 +361,11 @@ def build_admin_dashboard(
         ).fetchall()
         experience_rows = conn.execute(
             """
-            SELECT outcome, COUNT(*) AS amount
-            FROM event_experience_feedback
-            WHERE created_at >= ? AND created_at < ?
+            SELECT feedback.outcome, COUNT(*) AS amount
+            FROM event_experience_feedback feedback
+            JOIN event_groups eg ON eg.id = feedback.group_id
+            WHERE feedback.created_at >= ? AND feedback.created_at < ?
+              AND eg.research_campaign IS NULL
             GROUP BY outcome
             ORDER BY amount DESC, outcome
             """,
@@ -570,6 +580,7 @@ def build_admin_dashboard(
             }
             for row in campaign_rows
         ],
+        "research_campaigns": list_research_campaigns(),
         "company_outcomes": [
             {
                 "outcome": row["outcome"],

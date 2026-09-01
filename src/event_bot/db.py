@@ -144,6 +144,9 @@ def get_inactive_feedback_user_ids(
               ON prompt.user_id = activity.user_id
             WHERE activity.last_activity <= ?
               AND prompt.user_id IS NULL
+              AND activity.user_id NOT IN (
+                  SELECT user_id FROM research_participants
+              )
             """
             + excluded_sql
             + """
@@ -813,11 +816,42 @@ def archive_expired_event_groups() -> int:
         return cursor.rowcount
 
 
-def find_events_with_open_companies(*, limit: int = 12) -> list[Event]:
+def _active_research_campaign_in_connection(
+    conn: sqlite3.Connection,
+    user_id: int,
+) -> str | None:
+    row = conn.execute(
+        """
+        SELECT campaign
+        FROM research_participants
+        WHERE user_id = ? AND active = 1
+        ORDER BY enrolled_at DESC, campaign DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    return str(row["campaign"]) if row is not None else None
+
+
+def _research_group_filter(
+    campaign: str | None,
+    alias: str = "eg",
+) -> tuple[str, tuple[object, ...]]:
+    if campaign is None:
+        return f" AND {alias}.research_campaign IS NULL", ()
+    return f" AND {alias}.research_campaign = ?", (campaign,)
+
+
+def find_events_with_open_companies(
+    *,
+    limit: int = 12,
+    research_campaign: str | None = None,
+) -> list[Event]:
     """Будущие события, где хотя бы одна компания ещё принимает участников."""
     with get_connection() as conn:
+        research_sql, research_params = _research_group_filter(research_campaign)
         rows = conn.execute(
-            """
+            f"""
             SELECT e.*
             FROM events e
             JOIN (
@@ -827,6 +861,7 @@ def find_events_with_open_companies(*, limit: int = 12) -> list[Event]:
                     FROM event_groups eg
                     JOIN event_group_members gm ON gm.group_id = eg.id
                     WHERE eg.status = 'forming'
+                    {research_sql}
                     GROUP BY eg.id
                     HAVING COUNT(gm.user_id) < eg.target_size
                 ) AS open_groups
@@ -838,7 +873,7 @@ def find_events_with_open_companies(*, limit: int = 12) -> list[Event]:
             ORDER BY discovery.newest_group DESC, e.date, e.id
             LIMIT ?
             """,
-            (max(1, min(limit, 50)),),
+            (*research_params, max(1, min(limit, 50))),
         ).fetchall()
     events: list[Event] = []
     for row in rows:
@@ -861,6 +896,7 @@ def join_event_group(
     """
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        research_campaign = _active_research_campaign_in_connection(conn, user_id)
         user = conn.execute(
             """
             SELECT u.interests, u.group_size_min, u.group_size_max
@@ -875,14 +911,16 @@ def join_event_group(
         if user is None:
             return "unavailable", None, []
 
+        research_sql, research_params = _research_group_filter(research_campaign)
         existing = conn.execute(
-            """
+            f"""
             SELECT eg.id
             FROM event_groups eg
             JOIN event_group_members gm ON gm.group_id = eg.id
             WHERE eg.event_id = ? AND gm.user_id = ?
+              {research_sql}
             """,
-            (event_id, user_id),
+            (event_id, user_id, *research_params),
         ).fetchone()
         if existing is not None:
             member_ids = [
@@ -908,13 +946,14 @@ def join_event_group(
             user_interests = set()
 
         candidates = conn.execute(
-            """
+            f"""
             SELECT eg.id, eg.target_size, COUNT(gm.user_id) AS member_count
             FROM event_groups eg
             LEFT JOIN event_group_members gm ON gm.group_id = eg.id
             WHERE eg.event_id = ?
               AND eg.status = 'forming'
               AND eg.target_size BETWEEN ? AND ?
+              {research_sql}
               AND NOT EXISTS (
                   SELECT 1
                   FROM event_group_members existing_member
@@ -931,6 +970,7 @@ def join_event_group(
                 event_id,
                 preference_min,
                 preference_max,
+                *research_params,
                 user_id,
                 user_id,
             ),
@@ -970,8 +1010,11 @@ def join_event_group(
                 user["group_size_min"], user["group_size_max"]
             )
             group_id = conn.execute(
-                "INSERT INTO event_groups (event_id, target_size) VALUES (?, ?)",
-                (event_id, target_size),
+                """
+                INSERT INTO event_groups (event_id, target_size, research_campaign)
+                VALUES (?, ?, ?)
+                """,
+                (event_id, target_size, research_campaign),
             ).lastrowid
 
         conn.execute(
@@ -1110,20 +1153,23 @@ def get_event_group(group_id: int, user_id: int) -> dict[str, object] | None:
 
 def get_user_event_groups(user_id: int, *, limit: int = 20) -> list[dict[str, object]]:
     with get_connection() as conn:
+        campaign = _active_research_campaign_in_connection(conn, user_id)
+        research_sql, research_params = _research_group_filter(campaign)
         rows = conn.execute(
-            """
+            f"""
             SELECT eg.id
             FROM event_groups eg
             JOIN event_group_members gm ON gm.group_id = eg.id
             JOIN events e ON e.id = eg.event_id
             WHERE gm.user_id = ?
               AND eg.status != 'archived'
+              {research_sql}
               AND COALESCE(e.end_date, datetime(e.date, '+3 hours'))
                     > datetime('now', '+3 hours')
             ORDER BY e.date, eg.id
             LIMIT ?
             """,
-            (user_id, limit),
+            (user_id, *research_params, limit),
         ).fetchall()
         return [
             payload
@@ -1133,11 +1179,16 @@ def get_user_event_groups(user_id: int, *, limit: int = 20) -> list[dict[str, ob
         ]
 
 
-def get_event_company_counts(event_ids: list[int]) -> dict[int, int]:
+def get_event_company_counts(
+    event_ids: list[int],
+    *,
+    research_campaign: str | None = None,
+) -> dict[int, int]:
     if not event_ids:
         return {}
     placeholders = ",".join("?" for _ in event_ids)
     with get_connection() as conn:
+        research_sql, research_params = _research_group_filter(research_campaign)
         rows = conn.execute(
             f"""
             SELECT eg.event_id, COUNT(gm.user_id) AS amount
@@ -1145,10 +1196,11 @@ def get_event_company_counts(event_ids: list[int]) -> dict[int, int]:
             JOIN event_group_members gm ON gm.group_id = eg.id
             WHERE eg.event_id IN ({placeholders})
               AND eg.status = 'forming'
+              {research_sql}
             GROUP BY eg.event_id
             HAVING COUNT(gm.user_id) < eg.target_size
             """,
-            event_ids,
+            (*event_ids, *research_params),
         ).fetchall()
     return {row["event_id"]: row["amount"] for row in rows}
 
@@ -2352,9 +2404,10 @@ def delete_user_data(user_id: int) -> bool:
             UNION SELECT 1 FROM usage_events WHERE user_id = ?
             UNION SELECT 1 FROM feedback_messages WHERE user_id = ?
             UNION SELECT 1 FROM user_acquisition WHERE user_id = ?
+            UNION SELECT 1 FROM research_participants WHERE user_id = ?
             LIMIT 1
             """,
-            (user_id, user_id, user_id, user_id),
+            (user_id, user_id, user_id, user_id, user_id),
         ).fetchone()
         group_ids = [
             row["group_id"]
@@ -2378,6 +2431,8 @@ def delete_user_data(user_id: int) -> bool:
             (user_id, user_id),
         )
         conn.execute("DELETE FROM user_acquisition WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM research_sessions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM research_participants WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM admin_report_deliveries WHERE admin_id = ?", (user_id,))
         conn.execute("DELETE FROM users WHERE telegram_id = ?", (user_id,))
         return exists is not None

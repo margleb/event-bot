@@ -9,9 +9,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260831-release-readiness">
+    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260901-research-analytics">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/r/app/assets/app.js?v=20260831-release-readiness" defer></script>
+    <script src="/r/app/assets/app.js?v=20260901-research-analytics" defer></script>
   </head>
   <body>
     <div id="loading" class="state-screen">
@@ -141,6 +141,25 @@
               </div>
             </div>
             <div id="admin-campaigns" class="analytics-list"></div>
+          </article>
+
+          <article class="analytics-card research-card">
+            <div class="analytics-card-heading">
+              <div>
+                <p class="eyebrow">UX-ИССЛЕДОВАНИЯ</p>
+                <h3>Прохождения тестировщиков</h3>
+              </div>
+            </div>
+            <div id="admin-research-controls" class="research-controls hidden">
+              <select id="admin-research-campaign" aria-label="Исследовательская кампания"></select>
+              <button id="admin-research-export" class="secondary-button" type="button">Скачать CSV</button>
+            </div>
+            <div id="admin-research-empty" class="analytics-empty">Кампаний пока нет. Запустите ссылку вида <b>t.me/MskMeetupBot?start=ux_unu_sep2026</b>.</div>
+            <div id="admin-research-summary" class="admin-insight-grid research-summary"></div>
+            <h4 class="research-subtitle">Воронка сценария</h4>
+            <div id="admin-research-funnel" class="analytics-list"></div>
+            <h4 class="research-subtitle">Участники и точки остановки</h4>
+            <div id="admin-research-participants" class="research-participants"></div>
           </article>
 
           <article class="analytics-card">

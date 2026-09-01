@@ -20,6 +20,7 @@ from event_bot.analytics import (
     is_admin,
     mark_feedback_answered,
     notify_admins,
+    record_usage,
 )
 from event_bot.db import (
     INTENT_STATUSES,
@@ -53,6 +54,7 @@ from event_bot.db import (
 )
 from event_bot.digest import DIGEST_WEEKDAY_LABELS
 from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
+from event_bot.research_analytics import enroll_research_participant
 from event_bot.keyboards import (
     companion_keyboard,
     feedback_cancel_keyboard,
@@ -143,6 +145,7 @@ async def start(
     command: CommandObject,
 ) -> None:
     await state.clear()
+    research_participant = None
     if message.from_user is not None:
         if is_user_suspended(message.from_user.id):
             await message.answer(
@@ -151,11 +154,31 @@ async def start(
             )
             return
         record_user_acquisition(message.from_user.id, command.args)
+        research_participant = enroll_research_participant(
+            message.from_user.id,
+            command.args,
+        )
+        if research_participant is not None:
+            record_usage(
+                message.from_user.id,
+                "research.enrolled",
+                "bot",
+                {"participant_code": research_participant.participant_code},
+                campaign=research_participant.campaign,
+            )
     miniapp_url = os.getenv("MINIAPP_URL", "").strip()
+    research_copy = (
+        "\n\n🧪 Вы участвуете в исследовании интерфейса. "
+        f"Ваш код: <code>{research_participant.participant_code}</code>. "
+        "Сохраните его — он понадобится в отчёте исполнителя."
+        if research_participant is not None
+        else ""
+    )
     await message.answer(
         "Мск.Митап подбирает мероприятия по вашим интересам и помогает "
         "найти людей, с которыми можно на них сходить.\n\n"
-        "Выберите, что хотите открыть:",
+        f"Выберите, что хотите открыть:{research_copy}",
+        parse_mode="HTML",
         reply_markup=(main_menu_keyboard(miniapp_url) if miniapp_url else None),
     )
 

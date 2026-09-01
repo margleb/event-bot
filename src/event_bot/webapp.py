@@ -18,7 +18,7 @@ from typing import Annotated
 
 from aiogram import Bot
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 
@@ -71,6 +71,14 @@ from event_bot.embedding_provider import (
 )
 from event_bot.keyboards import miniapp_keyboard, miniapp_tab_url
 from event_bot.models import Event, Profile, UserIntent, format_group_size
+from event_bot.research_analytics import (
+    build_research_dashboard,
+    export_research_events_csv,
+    get_research_participant,
+    normalize_research_campaign,
+    reset_research_session_context,
+    set_research_session_context,
+)
 from event_bot.source_branding import source_brand
 from event_bot.web_auth import (
     TelegramUser,
@@ -274,6 +282,8 @@ def _resolve_event_group_member(
 
 
 def _bootstrap(user: TelegramUser) -> dict[str, object]:
+    research = get_research_participant(user.id)
+    research_campaign = research.campaign if research is not None else None
     profile = get_user_profile(user.id)
     if profile is not None:
         update_user_identity(user.id, user.first_name, user.username)
@@ -301,7 +311,12 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
         for group in event_groups
     }
     company_discovery = (
-        find_events_with_open_companies(limit=12) if profile is not None else []
+        find_events_with_open_companies(
+            limit=12,
+            research_campaign=research_campaign,
+        )
+        if profile is not None
+        else []
     )
     event_ids = list(
         {
@@ -310,7 +325,10 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
             *[event.id for event in company_discovery if event.id is not None],
         }
     )
-    company_counts = get_event_company_counts(event_ids)
+    company_counts = get_event_company_counts(
+        event_ids,
+        research_campaign=research_campaign,
+    )
 
     def event_payload(event: Event, intent: UserIntent | None) -> dict[str, object]:
         membership = membership_by_event.get(event.id)
@@ -330,6 +348,14 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
             "photo_url": user.photo_url,
         },
         "is_admin": is_admin(user.id),
+        "research": (
+            {
+                "campaign": research.campaign,
+                "participant_code": research.participant_code,
+            }
+            if research is not None
+            else None
+        ),
         "profile": _profile_payload(profile),
         "digest_weekday": get_digest_schedule(user.id) if profile else None,
         "event_groups": event_groups,
@@ -389,7 +415,13 @@ app.mount(f"{BASE_PATH}/app/assets", StaticFiles(directory=STATIC_DIR), name="as
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    response = await call_next(request)
+    research_token = set_research_session_context(
+        request.headers.get("X-Research-Session")
+    )
+    try:
+        response = await call_next(request)
+    finally:
+        reset_research_session_context(research_token)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
@@ -516,7 +548,12 @@ def track_miniapp_event(
     payload: TrackEvent,
     user: Annotated[TelegramUser, Depends(authenticated_user)],
 ) -> dict[str, str]:
-    record_usage(user.id, f"miniapp.{payload.event}", "miniapp")
+    record_usage(
+        user.id,
+        f"miniapp.{payload.event}",
+        "miniapp",
+        payload.metadata,
+    )
     return {"status": "ok"}
 
 
@@ -531,6 +568,42 @@ def admin_analytics(
             "Period must be 7, 30 or 90 days",
         )
     return build_admin_dashboard(days)
+
+
+@app.get(f"{BASE_PATH}/api/admin/research")
+def admin_research_analytics(
+    campaign: str,
+    user: Annotated[TelegramUser, Depends(authenticated_admin)],
+) -> dict[str, object]:
+    del user
+    try:
+        return build_research_dashboard(campaign)
+    except ValueError as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+
+
+@app.get(f"{BASE_PATH}/api/admin/research/export")
+def admin_research_export(
+    campaign: str,
+    user: Annotated[TelegramUser, Depends(authenticated_admin)],
+) -> Response:
+    del user
+    normalized = normalize_research_campaign(campaign)
+    if normalized is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Недопустимая исследовательская кампания",
+        )
+    csv_text = export_research_events_csv(normalized)
+    return Response(
+        content="\ufeff" + csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{normalized}-research-events.csv"'
+            )
+        },
+    )
 
 
 @app.post(f"{BASE_PATH}/api/feedback")
@@ -566,6 +639,7 @@ async def update_profile(
     payload: ProfileUpdate,
     user: Annotated[TelegramUser, Depends(authenticated_user)],
 ) -> dict[str, object]:
+    was_profiled = get_user_profile(user.id) is not None
     profile = Profile(
         interests=payload.interests,
         avoid=payload.avoid,
@@ -586,7 +660,14 @@ async def update_profile(
         avoid_embedding_model=embeddings[3],
     )
     set_digest_schedule(user.id, payload.digest_weekday)
-    record_usage(user.id, "miniapp.profile_saved", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.profile_saved",
+        "miniapp",
+        {
+            "status": "updated" if was_profiled else "created",
+        },
+    )
     return _bootstrap(user)
 
 
@@ -601,7 +682,12 @@ def update_intent(
     if get_user_profile(user.id) is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Complete your profile first")
     save_intent(user.id, event_id, payload.status)
-    record_usage(user.id, f"miniapp.intent.{payload.status}", "miniapp")
+    record_usage(
+        user.id,
+        f"miniapp.intent.{payload.status}",
+        "miniapp",
+        {"event_id": event_id, "status": payload.status},
+    )
     intent = get_user_intent(user.id, event_id)
     assert intent is not None
     return _event_payload(intent.event, intent)
@@ -622,7 +708,7 @@ def update_visibility(
         user.id,
         "miniapp.visibility",
         "miniapp",
-        {"visible": payload.visible},
+        {"event_id": event_id, "status": "visible" if payload.visible else "hidden"},
     )
     updated = get_user_intent(user.id, event_id)
     assert updated is not None
@@ -639,7 +725,12 @@ async def join_event_company(
         raise HTTPException(status.HTTP_409_CONFLICT, "Мероприятие уже недоступно")
     group = _fresh_event_group(group_id, user.id)
     if result == "joined":
-        record_usage(user.id, "miniapp.event_company.joined", "miniapp")
+        record_usage(
+            user.id,
+            "miniapp.event_company.joined",
+            "miniapp",
+            {"event_id": event_id, "group_id": group_id, "status": result},
+        )
         if len(member_ids) >= 2:
             title = group["event"]["title"]
             if group["status"] == "active":
@@ -678,7 +769,12 @@ async def leave_event_company(
             f"👥 Состав компании на «{current['event'].title}» изменился. Мы продолжим поиск замены.",
             exclude_user_id=user.id,
         )
-    record_usage(user.id, "miniapp.event_company.left", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.event_company.left",
+        "miniapp",
+        {"group_id": group_id},
+    )
     return {"status": "left"}
 
 
@@ -691,7 +787,12 @@ async def update_event_company_rsvp(
     current = get_event_group(group_id, user.id)
     if not set_event_group_rsvp(group_id, user.id, payload.status):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Компания не найдена")
-    record_usage(user.id, f"miniapp.event_company.rsvp.{payload.status}", "miniapp")
+    record_usage(
+        user.id,
+        f"miniapp.event_company.rsvp.{payload.status}",
+        "miniapp",
+        {"group_id": group_id, "status": payload.status},
+    )
     if payload.status == "declined":
         if current is not None:
             await _notify_event_company(
@@ -720,7 +821,12 @@ async def update_event_company_meeting_point(
         f"📍 {user.first_name} предлагает место встречи: {payload.meeting_point}",
         exclude_user_id=user.id,
     )
-    record_usage(user.id, "miniapp.event_company.meeting_point", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.event_company.meeting_point",
+        "miniapp",
+        {"group_id": group_id},
+    )
     return {"status": "updated", "event_group": group}
 
 
@@ -741,7 +847,12 @@ async def send_event_company_message(
         f"💬 {user.first_name}: {preview}",
         exclude_user_id=user.id,
     )
-    record_usage(user.id, "miniapp.event_company.message.sent", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.event_company.message.sent",
+        "miniapp",
+        {"group_id": group_id},
+    )
     return {"status": "created", "event_group": _fresh_event_group(group_id, user.id)}
 
 
@@ -773,7 +884,12 @@ async def request_event_company_connection(
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много запросов за сутки")
     elif result in {"blocked", "unavailable"}:
         raise HTTPException(status.HTTP_409_CONFLICT, "Сейчас познакомиться не получится")
-    record_usage(user.id, f"miniapp.event_company.connection.{result}", "miniapp")
+    record_usage(
+        user.id,
+        f"miniapp.event_company.connection.{result}",
+        "miniapp",
+        {"group_id": group_id, "status": result},
+    )
     return {"status": result, "event_group": _fresh_event_group(group_id, user.id)}
 
 
@@ -793,7 +909,12 @@ async def accept_event_company_connection(
         [request.from_user, request.to_user],
         f"✅ Знакомство перед «{request.event_title}» подтверждено. Контакты открылись в приложении.",
     )
-    record_usage(user.id, "miniapp.event_company.connection.accepted", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.event_company.connection.accepted",
+        "miniapp",
+        {"group_id": group_id},
+    )
     return {"status": result, "event_group": _fresh_event_group(group_id, user.id)}
 
 
@@ -808,7 +929,12 @@ def reject_event_company_connection(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Запрос не найден")
     if not reject_connection_request(request_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Запрос не найден")
-    record_usage(user.id, "miniapp.event_company.connection.rejected", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.event_company.connection.rejected",
+        "miniapp",
+        {"group_id": group_id},
+    )
     return {"status": "rejected", "event_group": _fresh_event_group(group_id, user.id)}
 
 
@@ -834,7 +960,12 @@ async def report_event_company_member(
     if result != "created" or report is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Не удалось отправить жалобу")
     await _notify_admins_about_report(report)
-    record_usage(user.id, "miniapp.event_company.member.reported", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.event_company.member.reported",
+        "miniapp",
+        {"group_id": group_id, "reason": payload.reason},
+    )
     return {"status": "reported", "report_id": report["id"]}
 
 
@@ -849,7 +980,12 @@ def block_event_company_member(
     )
     if not block_user(user.id, target_user_id):
         raise HTTPException(status.HTTP_409_CONFLICT, "Не удалось заблокировать пользователя")
-    record_usage(user.id, "miniapp.event_company.member.blocked", "miniapp")
+    record_usage(
+        user.id,
+        "miniapp.event_company.member.blocked",
+        "miniapp",
+        {"group_id": group_id},
+    )
     return {"status": "blocked"}
 
 

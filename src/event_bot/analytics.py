@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from event_bot.db import DB_DATETIME_FORMAT, get_connection
+from event_bot.research_analytics import bind_research_event
 
 
 EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.:-]{1,80}$")
@@ -49,6 +50,12 @@ EVENT_LABELS = {
     "miniapp.tab.admin": "Вкладка «Аналитика»",
     "miniapp.event_details": "Карточка события",
     "miniapp.external_source": "Переход к источнику",
+    "miniapp.company_prompt_opened": "Открытие поиска компании",
+    "miniapp.group_details": "Просмотр компании",
+    "miniapp.profile_editor_opened": "Открытие редактора профиля",
+    "miniapp.profile_validation_failed": "Ошибка заполнения профиля",
+    "research.enrolled": "Регистрация в UX-исследовании",
+    "miniapp.session_heartbeat": "Активная UX-сессия",
     "miniapp.profile_saved": "Сохранение профиля",
     "miniapp.intent.interested": "Mini App: «Интересно»",
     "miniapp.intent.going": "Mini App: «Пойду»",
@@ -100,18 +107,36 @@ def record_usage(
     event_name: str,
     source: str,
     metadata: dict[str, object] | None = None,
+    *,
+    campaign: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     """Пишет техническое событие без текста пользовательского сообщения."""
     if user_id <= 0 or not EVENT_NAME_PATTERN.fullmatch(event_name):
         return
-    payload = json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":"))
+    bound_session, bound_campaign, bound_metadata = bind_research_event(
+        user_id,
+        event_name,
+        metadata,
+        campaign=campaign,
+        session_id=session_id,
+    )
+    payload = json.dumps(bound_metadata, ensure_ascii=False, separators=(",", ":"))
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO usage_events (user_id, event_name, source, metadata)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO usage_events
+                (user_id, event_name, source, metadata, session_id, campaign)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user_id, event_name, source[:20], payload[:2000]),
+            (
+                user_id,
+                event_name,
+                source[:20],
+                payload[:2000],
+                bound_session,
+                bound_campaign,
+            ),
         )
 
 

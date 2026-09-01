@@ -328,6 +328,19 @@ button { border: 0; cursor: pointer; }
 .source-health-row.warning > i, .source-health-row.stale > i { background: #e09b2d; }
 .source-health-row.failed > i { background: #d83a2e; }
 .analytics-empty, .empty-state { padding: 32px 20px; border-radius: 18px; background: var(--surface); color: var(--body); font-size: 12px; text-align: center; }
+.research-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 14px; }
+.research-controls select { min-width: 0; min-height: 43px; padding: 0 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper); font-size: 11px; }
+.research-controls .secondary-button { padding: 0 12px; }
+.research-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 0 17px; }
+.research-summary .admin-kpi { min-height: 105px; }
+.research-subtitle { margin: 19px 0 10px; font: 17px "DM Serif Display", serif; }
+.research-participants { display: grid; gap: 8px; }
+.research-participant { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.research-participant > div { min-width: 0; }
+.research-participant b, .research-participant span { display: block; }
+.research-participant b { font-size: 11px; letter-spacing: .05em; }
+.research-participant span, .research-participant small { color: var(--muted); font-size: 9px; line-height: 1.35; }
+.research-participant.completed { border-color: #b9d9c6; background: var(--green-soft); }
 .empty-state span { display: block; margin-bottom: 10px; color: var(--coral); font-size: 32px; }
 .empty-state h3 { margin: 0 0 6px; font: 21px "DM Serif Display", serif; }
 .empty-state p { margin: 0; line-height: 1.45; }

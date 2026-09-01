@@ -129,15 +129,44 @@ MINIAPP_TRACK_EVENTS = {
     "tab.admin",
     "event_details",
     "external_source",
+    "company_prompt_opened",
+    "group_details",
+    "profile_editor_opened",
+    "profile_validation_failed",
+    "session_heartbeat",
+}
+
+MINIAPP_TRACK_METADATA_KEYS = {
+    "event_id",
+    "group_id",
+    "source_id",
+    "company_count",
+    "status",
+    "reason",
+    "tab",
 }
 
 
 class TrackEvent(BaseModel):
     event: str
+    metadata: dict[str, str | int | bool | None] = Field(default_factory=dict)
 
     @field_validator("event")
     @classmethod
     def allowed_event(cls, value: str) -> str:
         if value not in MINIAPP_TRACK_EVENTS:
             raise ValueError("неизвестное событие")
+        return value
+
+    @field_validator("metadata")
+    @classmethod
+    def safe_metadata(
+        cls,
+        value: dict[str, str | int | bool | None],
+    ) -> dict[str, str | int | bool | None]:
+        if len(value) > 8 or any(key not in MINIAPP_TRACK_METADATA_KEYS for key in value):
+            raise ValueError("недопустимые метаданные")
+        for item in value.values():
+            if isinstance(item, str) and len(item) > 64:
+                raise ValueError("слишком длинное значение метаданных")
         return value

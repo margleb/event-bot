@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS event_groups (
     target_size INTEGER NOT NULL DEFAULT 3,
     meeting_point TEXT,
     meeting_point_by INTEGER REFERENCES users(telegram_id),
+    research_campaign TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     activated_at TEXT
 );
@@ -113,6 +114,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
     event_name TEXT NOT NULL,
     source TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
+    session_id TEXT,
+    campaign TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -186,6 +189,26 @@ CREATE TABLE IF NOT EXISTS user_acquisition (
     first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS research_participants (
+    campaign TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    participant_code TEXT NOT NULL UNIQUE,
+    active INTEGER NOT NULL DEFAULT 1,
+    enrolled_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    PRIMARY KEY (campaign, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_sessions (
+    session_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    campaign TEXT NOT NULL,
+    participant_code TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS source_sync_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id TEXT NOT NULL,
@@ -232,6 +255,11 @@ ADDITIVE_COLUMNS = {
     },
     "event_groups": {
         "target_size": "INTEGER",
+        "research_campaign": "TEXT",
+    },
+    "usage_events": {
+        "session_id": "TEXT",
+        "campaign": "TEXT",
     },
 }
 
@@ -249,6 +277,8 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_user_created ON usage_events(user_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_name_created ON usage_events(event_name, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_events_campaign_created ON usage_events(campaign, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_events_session_created ON usage_events(session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback_messages(status, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_inactivity_feedback_sent ON inactivity_feedback_prompts(prompt_sent_at)",
     "CREATE INDEX IF NOT EXISTS idx_inactivity_feedback_response ON inactivity_feedback_prompts(response_code, responded_at)",
@@ -257,6 +287,11 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_event_group_deliveries_kind ON event_group_deliveries(kind, status, delivered_at)",
     "CREATE INDEX IF NOT EXISTS idx_event_feedback_outcome ON event_experience_feedback(outcome, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_user_acquisition_campaign ON user_acquisition(campaign, first_seen_at)",
+    "CREATE INDEX IF NOT EXISTS idx_research_participants_user ON research_participants(user_id, enrolled_at)",
+    "CREATE INDEX IF NOT EXISTS idx_research_participants_campaign ON research_participants(campaign, enrolled_at)",
+    "CREATE INDEX IF NOT EXISTS idx_research_sessions_campaign ON research_sessions(campaign, started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_research_sessions_user ON research_sessions(user_id, started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_event_groups_research ON event_groups(research_campaign, event_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_source_sync_runs_source_finished ON source_sync_runs(source_id, finished_at)",
 )
 
