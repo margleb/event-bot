@@ -72,9 +72,9 @@
     member_count: 3, minimum_members: 2, maximum_members: 5,
     can_interact: true, meeting_point: "У главного входа за 15 минут", meeting_point_author: "Аня",
     members: [
-      { name: "Аня", is_me: false, member_key: "preview-anya", common_interests: ["Концерты"], group_size: "3–5", rsvp: "going", connection_state: "connected", contact: { name: "Аня", url: "https://t.me/telegram" } },
-      { name: "Максим", is_me: false, member_key: "preview-max", common_interests: ["Концерты"], group_size: "3–5", rsvp: "going", connection_state: "available" },
-      { name: "Вы", is_me: true, member_key: null, common_interests: ["Концерты"], group_size: "2–5", rsvp: "going", connection_state: "self" },
+      { name: "Аня", photo_url: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=640&h=640&fit=crop", is_me: false, member_key: "preview-anya", common_interests: ["Концерты"], group_size: "3–5", rsvp: "going", connection_state: "connected", contact: { name: "Аня", url: "https://t.me/telegram" } },
+      { name: "Максим", photo_url: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=640&h=640&fit=crop", is_me: false, member_key: "preview-max", common_interests: ["Концерты"], group_size: "3–5", rsvp: "going", connection_state: "available" },
+      { name: "Вы", photo_url: null, is_me: true, member_key: null, common_interests: ["Концерты"], group_size: "2–5", rsvp: "going", connection_state: "self" },
     ],
     messages: [
       { id: 1, author_name: "Аня", is_me: false, message: "Всем привет! Встречаемся у входа?", created_at: "2026-08-29 12:35:00" },
@@ -246,6 +246,23 @@
     return String(value ?? "").replace(/[&<>'"]/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
     })[char]);
+  }
+
+  function compactMemberAvatar(member, index) {
+    const initial = (member.name || "У").slice(0, 1).toLocaleUpperCase("ru");
+    const image = member.photo_url
+      ? `<img src="${escapeHtml(member.photo_url)}" alt="">`
+      : "";
+    return `<i style="z-index:${4 - index}"><span>${escapeHtml(initial)}</span>${image}</i>`;
+  }
+
+  function memberAvatar(member) {
+    const initial = (member.name || "У").slice(0, 1).toLocaleUpperCase("ru");
+    if (!member.photo_url) {
+      return `<span class="member-avatar"><span>${escapeHtml(initial)}</span></span>`;
+    }
+    const name = member.is_me ? "Вы" : member.name;
+    return `<button class="member-avatar has-photo" type="button" data-avatar-photo="${escapeHtml(member.photo_url)}" data-avatar-name="${escapeHtml(name)}" aria-label="Открыть фотографию: ${escapeHtml(name)}"><span>${escapeHtml(initial)}</span><img src="${escapeHtml(member.photo_url)}" alt=""></button>`;
   }
 
   function variantFor(event) {
@@ -511,7 +528,7 @@
         <div class="company-list">${groups.map((item) => {
           const active = item.status === "active";
           const missing = Math.max(0, item.minimum_members - item.member_count);
-          const initials = (item.members || []).slice(0, 3).map((member, index) => `<i style="z-index:${4 - index}">${escapeHtml((member.name || "У").slice(0, 1).toLocaleUpperCase("ru"))}</i>`).join("");
+          const initials = (item.members || []).slice(0, 3).map(compactMemberAvatar).join("");
           return `<button class="company-list-card" type="button" data-select-company="${item.id}">
             <span class="company-list-image" style="background-image:url('${escapeHtml(eventImage(item.event))}')"></span>
             <span class="company-list-copy">
@@ -533,11 +550,10 @@
     const progressTarget = ready ? group.maximum_members : group.minimum_members;
     const progress = Math.min(100, Math.round((group.member_count / progressTarget) * 100));
     const members = (group.members || []).map((member) => {
-      const initial = (member.name || "У").slice(0, 1).toLocaleUpperCase("ru");
       const common = (member.common_interests || []).join(", ");
       return `
         <article class="member-card ${member.is_me ? "me" : ""}">
-          <span class="member-avatar">${escapeHtml(initial)}</span>
+          ${memberAvatar(member)}
           <div>
             <h4>${escapeHtml(member.name)}</h4>
             <p>${common ? `Общее: ${escapeHtml(common)}` : "Идёт на это же событие"} · ${member.rsvp === "going" ? "идёт" : "не сможет"}</p>
@@ -1247,6 +1263,28 @@
     tg?.BackButton?.hide();
   }
 
+  function openAvatarPreview(photoUrl, name) {
+    const preview = $("#avatar-preview");
+    const image = $("#avatar-preview-image");
+    image.src = photoUrl;
+    image.alt = `Фотография: ${name}`;
+    $("#avatar-preview-name").textContent = name;
+    preview.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+    tg?.BackButton?.show();
+    haptic();
+    trackMiniapp("member_photo_opened", { section: "event_company" });
+  }
+
+  function closeAvatarPreview() {
+    $("#avatar-preview").classList.add("hidden");
+    const image = $("#avatar-preview-image");
+    image.removeAttribute("src");
+    image.alt = "";
+    document.body.style.overflow = "";
+    tg?.BackButton?.hide();
+  }
+
   function addInterest() {
     const input = $("#custom-interest");
     const value = input.value.trim().replace(/\s+/g, " ");
@@ -1387,6 +1425,8 @@
       if (reportMember) reportEventMember(Number(reportMember.dataset.groupId), reportMember.dataset.eventReport);
       const blockMember = event.target.closest("[data-event-block]");
       if (blockMember) blockEventMember(Number(blockMember.dataset.groupId), blockMember.dataset.eventBlock);
+      const avatar = event.target.closest("[data-avatar-photo]");
+      if (avatar) openAvatarPreview(avatar.dataset.avatarPhoto, avatar.dataset.avatarName || "Участник");
       const privacy = event.target.closest("[data-open-privacy]");
       if (privacy) openInfoPage("privacy");
       const rules = event.target.closest("[data-open-rules]");
@@ -1489,8 +1529,21 @@
     $("#company-modal-backdrop").addEventListener("click", closeCompanyModal);
     $("#company-modal-cancel").addEventListener("click", closeCompanyModal);
     $("#company-modal-confirm").addEventListener("click", joinEventCompany);
+    $("#avatar-preview-close").addEventListener("click", closeAvatarPreview);
+    $("#avatar-preview-backdrop").addEventListener("click", closeAvatarPreview);
+    $("#avatar-preview-image").addEventListener("error", () => {
+      closeAvatarPreview();
+      toast("Фотография профиля сейчас недоступна");
+    });
+    document.addEventListener("error", (event) => {
+      if (event.target.matches?.(".member-avatar img, .company-members img")) event.target.remove();
+    }, true);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !$("#avatar-preview").classList.contains("hidden")) closeAvatarPreview();
+    });
     tg?.BackButton?.onClick(() => {
-      if (!$("#company-modal").classList.contains("hidden")) closeCompanyModal();
+      if (!$("#avatar-preview").classList.contains("hidden")) closeAvatarPreview();
+      else if (!$("#company-modal").classList.contains("hidden")) closeCompanyModal();
       else closeModal();
     });
   }

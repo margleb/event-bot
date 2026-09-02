@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Annotated
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
 
 from fastapi import Depends, Header, HTTPException, status
 
@@ -84,6 +84,10 @@ def validate_init_data(
 
     username = raw_user.get("username")
     photo_url = raw_user.get("photo_url")
+    if photo_url:
+        parsed_photo = urlparse(str(photo_url))
+        if parsed_photo.scheme != "https" or not parsed_photo.netloc:
+            photo_url = None
     return TelegramUser(
         id=user_id,
         first_name=first_name[:128],

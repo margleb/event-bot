@@ -58,6 +58,7 @@ def user_factory(temp_db):
         avoid: list[str] | None = None,
         name: str | None = None,
         username: str | None = None,
+        photo_url: str | None = None,
         confirmed: bool = True,
         budget_rub: int | None = None,
         group_size_min: int | None = None,
@@ -77,6 +78,7 @@ def user_factory(temp_db):
                 profile,
                 name or f"User {user_id}",
                 username if username is not None else f"user{user_id}",
+                photo_url=photo_url,
             )
         return user_id, profile
 

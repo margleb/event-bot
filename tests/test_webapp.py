@@ -22,6 +22,7 @@ def signed_init_data(
     *,
     user_id: int = 42,
     first_name: str = "Мария",
+    photo_url: str | None = None,
     auth_date: int | None = None,
 ) -> str:
     values = {
@@ -32,6 +33,7 @@ def signed_init_data(
                 "id": user_id,
                 "first_name": first_name,
                 "username": "maria_test",
+                **({"photo_url": photo_url} if photo_url else {}),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -60,12 +62,23 @@ def auth_headers(user_id: int = 42) -> dict[str, str]:
 def test_init_data_signature_and_freshness(monkeypatch):
     monkeypatch.setenv("MINIAPP_AUTH_MAX_AGE_SECONDS", "3600")
     now = 2_000_000_000
-    valid = signed_init_data(auth_date=now - 30)
+    valid = signed_init_data(
+        auth_date=now - 30,
+        photo_url="https://cdn.example.com/maria.jpg",
+    )
 
     user = validate_init_data(valid, BOT_TOKEN, now=now)
 
     assert user.id == 42
     assert user.first_name == "Мария"
+    assert user.photo_url == "https://cdn.example.com/maria.jpg"
+
+    unsafe_photo = validate_init_data(
+        signed_init_data(auth_date=now - 30, photo_url="javascript:alert(1)"),
+        BOT_TOKEN,
+        now=now,
+    )
+    assert unsafe_photo.photo_url is None
 
     tampered = valid.replace("maria_test", "attacker")
     try:
@@ -99,6 +112,7 @@ def test_miniapp_html_is_never_cached(temp_db):
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
     assert response.headers["pragma"] == "no-cache"
+    assert "avatar-preview" in response.text
 
 
 @pytest.mark.asyncio
@@ -280,6 +294,7 @@ def test_event_first_company_flow_is_scoped_to_one_event(
             user_id=user_id,
             interests=["Концерты", "Выставки"],
             username=f"eventmember{user_id}",
+            photo_url=f"https://cdn.example.com/users/{user_id}.jpg",
         )[0]
         for user_id in (42, 43, 44)
     ]
@@ -361,6 +376,12 @@ def test_event_first_company_flow_is_scoped_to_one_event(
     assert concert_group["status"] == "active"
     assert concert_group["member_count"] == 2
     assert concert_group["event"]["id"] == concert_id
+    assert {
+        member["photo_url"] for member in concert_group["members"]
+    } == {
+        "https://cdn.example.com/users/42.jpg",
+        "https://cdn.example.com/users/43.jpg",
+    }
     assert exhibition_group_id != concert_group_id
     assert other_event.json()["event_group"]["event"]["id"] == exhibition_id
     assert requested.status_code == 200

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL DEFAULT '',
     username TEXT,
+    photo_url TEXT,
     interests TEXT NOT NULL DEFAULT '[]',
     avoid TEXT NOT NULL DEFAULT '[]',
     days TEXT NOT NULL DEFAULT '[]',
@@ -229,6 +230,7 @@ ADDITIVE_COLUMNS = {
     "users": {
         "name": "TEXT NOT NULL DEFAULT ''",
         "username": "TEXT",
+        "photo_url": "TEXT",
         "profile_embedding": "BLOB",
         "profile_embedding_model": "TEXT",
         "avoid_embedding": "BLOB",

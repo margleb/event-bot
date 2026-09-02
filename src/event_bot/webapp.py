@@ -197,6 +197,7 @@ def _event_group_payload(
         members.append(
             {
                 "name": "Вы" if is_me else member["name"],
+                "photo_url": member["photo_url"],
                 "is_me": is_me,
                 "member_key": (
                     None
@@ -286,7 +287,12 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
     research_campaign = research.campaign if research is not None else None
     profile = get_user_profile(user.id)
     if profile is not None:
-        update_user_identity(user.id, user.first_name, user.username)
+        update_user_identity(
+            user.id,
+            user.first_name,
+            user.username,
+            user.photo_url,
+        )
     intents = get_user_intents(user.id) if profile is not None else []
     intents_by_event = {intent.event.id: intent for intent in intents}
     recommendations: list[Event] = []
@@ -654,6 +660,7 @@ async def update_profile(
         profile,
         user.first_name,
         user.username,
+        photo_url=user.photo_url,
         profile_embedding=embeddings[0],
         profile_embedding_model=embeddings[1],
         avoid_embedding=embeddings[2],

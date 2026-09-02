@@ -212,6 +212,7 @@ def save_user_profile(
     name: str,
     username: str | None = None,
     *,
+    photo_url: str | None = None,
     profile_embedding: bytes | None = None,
     profile_embedding_model: str | None = None,
     avoid_embedding: bytes | None = None,
@@ -226,17 +227,18 @@ def save_user_profile(
         conn.execute(
             """
             INSERT INTO users
-                (telegram_id, name, username, interests, avoid, days,
+                (telegram_id, name, username, photo_url, interests, avoid, days,
                  budget_rub, group_size_min, group_size_max,
                  profile_embedding, profile_embedding_model,
                  avoid_embedding, avoid_embedding_model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             -- UPSERT: если строка с таким telegram_id уже есть,
             -- вместо ошибки обновляем её поля (excluded — то, что пытались
             -- вставить)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 name           = excluded.name,
                 username       = excluded.username,
+                photo_url      = COALESCE(excluded.photo_url, users.photo_url),
                 interests      = excluded.interests,
                 avoid          = excluded.avoid,
                 days           = excluded.days,
@@ -252,6 +254,7 @@ def save_user_profile(
                 telegram_id,
                 name,
                 username,
+                photo_url,
                 # ensure_ascii=False, чтобы в базе была кириллица,
                 # а не \u04XX
                 json.dumps(profile.interests, ensure_ascii=False),
@@ -272,16 +275,18 @@ def update_user_identity(
     telegram_id: int,
     name: str,
     username: str | None,
+    photo_url: str | None = None,
 ) -> None:
-    """Освежает Telegram-имя у уже подтверждённого профиля."""
+    """Освежает Telegram-имя и доступную фотографию профиля."""
     with get_connection() as conn:
         conn.execute(
             """
             UPDATE users
-            SET name = ?, username = ?
+            SET name = ?, username = ?,
+                photo_url = COALESCE(?, photo_url)
             WHERE telegram_id = ?
             """,
-            (name, username, telegram_id),
+            (name, username, photo_url, telegram_id),
         )
 
 
@@ -1086,6 +1091,7 @@ def _event_group_payload_in_connection(
     member_rows = conn.execute(
         """
         SELECT gm.user_id, gm.rsvp, gm.joined_at, u.name, u.username,
+               u.photo_url,
                u.interests, u.group_size_min, u.group_size_max
         FROM event_group_members gm
         JOIN users u ON u.telegram_id = gm.user_id
@@ -1102,6 +1108,7 @@ def _event_group_payload_in_connection(
                 "user_id": row["user_id"],
                 "name": row["name"].strip() or UNKNOWN_NAME,
                 "username": row["username"],
+                "photo_url": row["photo_url"],
                 "rsvp": row["rsvp"],
                 "common_interests": [
                     item

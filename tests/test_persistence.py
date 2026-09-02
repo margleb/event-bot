@@ -26,6 +26,12 @@ def test_fresh_schema_contains_only_event_scoped_companies(temp_db):
     assert "interest_groups" not in tables
     assert "interest_group_members" not in tables
 
+    with db.get_connection() as conn:
+        user_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(users)")
+        }
+    assert "photo_url" in user_columns
+
 
 def test_initialization_preserves_unknown_historical_tables(temp_db):
     with db.get_connection() as conn:
