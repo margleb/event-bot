@@ -31,9 +31,12 @@
   const RESEARCH_EVENT_LABELS = {
     "miniapp.open": "открыл Mini App",
     "miniapp.profile_saved": "сохранил профиль",
+    "miniapp.profile_completed_screen": "увидел следующий шаг после профиля",
     "miniapp.event_details": "открыл мероприятие",
     "miniapp.company_prompt_opened": "открыл поиск компании",
     "miniapp.event_company.joined": "запустил поиск компании",
+    "miniapp.company_success_shown": "увидел результат запуска поиска",
+    "miniapp.company_success_opened": "перешёл в свою компанию",
     "miniapp.group_details": "открыл компанию",
     "miniapp.profile_editor_opened": "открыл настройки профиля",
     "miniapp.profile_validation_failed": "не смог сохранить профиль",
@@ -179,10 +182,13 @@
     budget: null,
     group: [null, null],
     feedCategory: "Все",
+    feedSort: "nearest",
     selectedEventGroupId: null,
     groupDetailOpen: false,
     profileEditorOpen: false,
+    profileJustCompleted: false,
     companyModalEventId: null,
+    companySuccessGroupId: null,
     modalEventId: null,
     adminData: null,
     adminDays: 30,
@@ -311,8 +317,10 @@
     if (event.company_group_id) {
       return `<button class="company-button joined" data-open-company="${event.company_group_id}" type="button">Открыть компанию <span>→</span></button>`;
     }
-    const label = event.company_count > 0 ? "Присоединиться" : "Найти компанию";
-    return `<button class="company-button" data-find-company="${event.id}" type="button">${label} <span>→</span></button>`;
+    const count = Number(event.company_count || 0);
+    if (count >= 5) return `<button class="company-button full" type="button" disabled>Компания полная</button>`;
+    const label = count > 0 ? `Присоединиться · ${count}` : "Создать компанию";
+    return `<button class="company-button" data-find-company="${event.id}" type="button">${label}<span>→</span></button>`;
   }
 
   function eventActions(event) {
@@ -366,14 +374,12 @@
 
   function companyDiscoveryCard(event) {
     const count = Number(event.company_count || 0);
-    const singular = count % 10 === 1 && count % 100 !== 11;
-    const few = [2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100);
-    const people = `${count} ${singular ? "человек ищет" : few ? "человека ищут" : "человек ищут"} компанию`;
+    const remaining = Math.max(0, 5 - count);
     return `
       <article class="company-discovery-card">
         <button class="discovery-image" type="button" data-open="${event.id}" style="background-image:url('${escapeHtml(eventImage(event))}')" aria-label="Подробнее о мероприятии">
           <span class="image-shade"></span>${sourceBadge(event)}
-          <strong><i>● ●</i>${escapeHtml(people)}</strong>
+          <span class="social-badges"><strong><i></i>Ищут: ${count}</strong><em>${remaining ? `Осталось ${remaining} ${remaining === 1 ? "место" : "места"}` : "Мест нет"}</em></span>
         </button>
         <div class="discovery-copy">
           <button type="button" data-open="${event.id}">${escapeHtml(event.title)}</button>
@@ -389,6 +395,57 @@
     return `<div class="empty-state"><span>◒</span><h3>Планы ещё впереди</h3><p>Отмечайте интересные события в афише — они появятся здесь.</p></div>`;
   }
 
+  function companyListCard(item) {
+    const active = item.status === "active";
+    const missing = Math.max(0, item.minimum_members - item.member_count);
+    const avatars = (item.members || []).slice(0, 5).map(compactMemberAvatar).join("");
+    return `<button class="company-list-card" type="button" data-select-company="${item.id}">
+      <span class="company-list-image" style="background-image:url('${escapeHtml(eventImage(item.event))}')"></span>
+      <span class="company-list-copy">
+        <em class="company-state ${active ? "success" : "waiting"}">${active ? "Компания собрана" : "Поиск идёт"}</em>
+        <b>${escapeHtml(item.event.title)}</b>
+        <small>${escapeHtml(formatWhen(item.event.date, true))}</small>
+        <span class="company-members">${avatars}<strong>${item.member_count}/${item.maximum_members}</strong></span>
+        <span class="company-next">${active ? "Договориться о встрече" : missing === 1 ? "Ждём ещё 1 человека" : `Ждём ещё ${missing} человек`} <i>›</i></span>
+      </span>
+    </button>`;
+  }
+
+  function updateCompanyBadge() {
+    const badge = $("#company-nav-badge");
+    const count = (state.data?.event_groups || []).length;
+    badge.textContent = count > 9 ? "9+" : String(count);
+    badge.classList.toggle("hidden", count === 0);
+  }
+
+  function isFreeEvent(event) {
+    const value = String(event.price || "").toLocaleLowerCase("ru");
+    return /бесплат|^0(?:\D|$)/.test(value);
+  }
+
+  function eventInterestScore(event) {
+    const interests = [...state.selectedInterests].map((item) => item.toLocaleLowerCase("ru"));
+    const category = categoryFor(event).toLocaleLowerCase("ru");
+    const haystack = `${event.title} ${(event.tags || []).join(" ")} ${category}`.toLocaleLowerCase("ru");
+    return interests.reduce((score, interest) => (
+      score + (haystack.includes(interest) || interest.includes(category) ? 1 : 0)
+    ), 0);
+  }
+
+  function prepareFeedEvents(items) {
+    let events = [...items];
+    if (state.feedCategory !== "Все") events = events.filter((event) => categoryFor(event) === state.feedCategory);
+    if (state.feedSort === "free") events = events.filter(isFreeEvent);
+    events.sort((left, right) => {
+      if (state.feedSort === "interests") {
+        const scoreDifference = eventInterestScore(right) - eventInterestScore(left);
+        if (scoreDifference) return scoreDifference;
+      }
+      return new Date(left.date).getTime() - new Date(right.date).getTime();
+    });
+    return events;
+  }
+
   function renderHeader() {
     const user = state.data.user;
     const avatar = $("#avatar");
@@ -397,21 +454,24 @@
   }
 
   function renderFeed() {
-    const companyEvents = (state.data.company_events || []).filter((event) => Number(event.company_count || 0) > 0);
+    const companyEvents = prepareFeedEvents((state.data.company_events || []).filter((event) => Number(event.company_count || 0) > 0));
     const companyIds = new Set(companyEvents.map((event) => event.id));
-    const events = (state.data.events || []).filter((event) => (
-      !companyIds.has(event.id)
-      && (state.feedCategory === "Все" || categoryFor(event) === state.feedCategory)
-    ));
+    const events = prepareFeedEvents((state.data.events || []).filter((event) => !companyIds.has(event.id)));
     $("#company-discovery").classList.toggle("hidden", !companyEvents.length);
     $("#company-event-list").innerHTML = companyEvents.map((event) => companyDiscoveryCard(event)).join("");
-    $("#company-nav-dot").classList.toggle("hidden", !(state.data.event_groups || []).some((group) => group.status !== "active"));
+    updateCompanyBadge();
     $("#event-count").textContent = events.length;
     $("#event-list").innerHTML = events.length ? events.map((event) => eventCard(event)).join("") : emptyState("feed");
   }
 
   function renderMy() {
-    const events = (state.data.my_events || []).filter((event) => state.myFilter === "all" || event.intent === state.myFilter);
+    const groups = state.data.event_groups || [];
+    const events = (state.data.my_events || []).filter((event) => !event.company_group_id);
+    $("#my-company-count").textContent = groups.length;
+    $("#my-event-count").textContent = events.length;
+    $("#my-company-list").innerHTML = groups.length
+      ? groups.map(companyListCard).join("")
+      : `<div class="empty-state compact"><span>◎</span><h3>Компаний пока нет</h3><p>Выберите событие в афише и создайте компанию или присоединитесь к сбору.</p><button class="secondary-button" type="button" data-tab="feed">Открыть афишу</button></div>`;
     $("#my-event-list").innerHTML = events.length ? events.map((event) => myEventCard(event)).join("") : emptyState("my");
   }
 
@@ -459,6 +519,7 @@
     $("#profile-editor").classList.toggle("hidden", !state.profileEditorOpen);
     $("#profile-editor-back").classList.toggle("hidden", onboarding);
     $("#onboarding-copy").classList.toggle("hidden", !onboarding);
+    $("#save-profile span").textContent = onboarding ? "Сохранить и продолжить" : "Сохранить изменения";
   }
 
   function groupConnectionActions(member, groupId) {
@@ -510,7 +571,7 @@
   function renderGroup() {
     const container = $("#group-content");
     const groups = state.data.event_groups || [];
-    $("#company-nav-dot").classList.toggle("hidden", !groups.some((group) => group.status !== "active"));
+    updateCompanyBadge();
     if (!groups.length) {
       container.innerHTML = `
         <div class="screen-heading"><h1>Компания</h1><p>Здесь появятся группы по выбранным мероприятиям</p></div>
@@ -525,21 +586,7 @@
     if (!state.groupDetailOpen) {
       container.innerHTML = `
         <div class="screen-heading"><h1>Компания</h1><p>Ваши группы по конкретным мероприятиям</p></div>
-        <div class="company-list">${groups.map((item) => {
-          const active = item.status === "active";
-          const missing = Math.max(0, item.minimum_members - item.member_count);
-          const initials = (item.members || []).slice(0, 3).map(compactMemberAvatar).join("");
-          return `<button class="company-list-card" type="button" data-select-company="${item.id}">
-            <span class="company-list-image" style="background-image:url('${escapeHtml(eventImage(item.event))}')"></span>
-            <span class="company-list-copy">
-              <em class="company-state ${active ? "success" : "waiting"}">${active ? "Группа собрана" : "Ищем людей"}</em>
-              <b>${escapeHtml(item.event.title)}</b>
-              <small>${escapeHtml(formatWhen(item.event.date, true))}</small>
-              <span class="company-members">${initials}<strong>${item.member_count}/${item.maximum_members}</strong></span>
-              <span class="company-next">${active ? "Открыть чат и подтвердить участие" : missing === 1 ? "Ждём ещё 1 человека" : `Ждём ещё ${missing} человек`} <i>›</i></span>
-            </span>
-          </button>`;
-        }).join("")}</div>`;
+        <div class="company-list">${groups.map(companyListCard).join("")}</div>`;
       return;
     }
     if (!groups.some((group) => group.id === state.selectedEventGroupId)) state.selectedEventGroupId = groups[0].id;
@@ -563,17 +610,22 @@
         </article>`;
     }).join("");
     const me = (group.members || []).find((member) => member.is_me);
+    const pendingSlots = Array.from({ length: Math.max(0, Math.min(group.maximum_members - group.member_count, 4)) }, () => '<i class="pending">?</i>').join("");
+    const participantStrip = `<div class="participant-strip"><div>${(group.members || []).slice(0, 5).map(compactMemberAvatar).join("")}${pendingSlots}</div><b>${group.member_count}/${group.maximum_members}</b></div>`;
     const waiting = `
       <article class="waiting-card">
         <span class="waiting-orbit">◎</span>
-        <p class="eyebrow">ИЩЕМ КОМПАНИЮ</p>
+        <p class="eyebrow">ПОИСК ИДЁТ</p>
         <h3>${missing === 1 ? "Ищем ещё одного человека" : `Ищем ещё ${missing} человек`}</h3>
         <p>${group.member_count} из ${group.minimum_members}–${group.maximum_members} участников</p>
+        ${participantStrip}
         <div class="group-progress"><span style="width:${progress}%"></span></div>
         <div class="notify-note">🔔 Сообщим в Telegram, когда кто-то присоединится. Приложение можно закрыть.</div>
         <button class="text-button danger" type="button" data-leave-company="${group.id}">Отменить поиск</button>
       </article>`;
     const active = `
+      <article class="next-action-card"><span>✓</span><div><p class="eyebrow">СЛЕДУЮЩИЙ ШАГ</p><h3>Компания собрана — договоритесь о встрече</h3><p>Подтвердите участие и напишите, где удобно встретиться.</p></div><button class="primary-button" type="button" data-scroll-chat>Написать в общий чат</button></article>
+      ${participantStrip}
       <div class="rsvp-card"><div><p class="eyebrow">ПОДТВЕРДИТЕ УЧАСТИЕ</p><b>${me?.rsvp === "going" ? "Вы идёте" : me?.rsvp === "declined" ? "Вы не сможете" : "Ответьте группе"}</b></div><div><button class="${me?.rsvp === "going" ? "active" : ""}" data-event-rsvp="going" data-group-id="${group.id}">Иду</button><button class="${me?.rsvp === "declined" ? "active" : ""}" data-event-rsvp="declined" data-group-id="${group.id}">Не смогу</button></div></div>
       <section class="meeting-card"><p class="eyebrow">МЕСТО ВСТРЕЧИ</p>${group.meeting_point ? `<h3>${escapeHtml(group.meeting_point)}</h3><p>Предложил(а): ${escapeHtml(group.meeting_point_author || "участник")}</p>` : `<h3>Пока не договорились</h3><p>Предложите понятный ориентир и время.</p>`}<form id="meeting-form" data-group-id="${group.id}"><input maxlength="240" placeholder="Например: у входа в 19:45"><button type="submit">Предложить</button></form></section>
       <h3 class="group-members-title">Участники · ${group.member_count}/${group.maximum_members}</h3>
@@ -585,7 +637,7 @@
         <span class="group-hero-image" style="background-image:url('${escapeHtml(eventImage(event))}')"></span>
         <span class="group-hero-shade"></span>
         ${sourceBadge(event)}
-        <span class="group-status ${ready ? "success" : "waiting"}">${ready ? "ГРУППА СОБРАНА" : "ИДЁТ ПОИСК"}</span>
+        <span class="group-status ${ready ? "success" : "waiting"}">${ready ? "КОМПАНИЯ СОБРАНА" : "ПОИСК ИДЁТ"}</span>
         <h3>${escapeHtml(event.title)}</h3>
         <p>${formatWhen(event.date, true)} · ${escapeHtml(event.venue || event.address || "Москва")}</p>
         <button class="group-event-open" type="button" data-open="${event.id}">Открыть мероприятие ↗</button>
@@ -914,7 +966,25 @@
     }
   }
 
+  function showProfileSuccess() {
+    state.profileJustCompleted = true;
+    $("#profile-success-interests").innerHTML = [...state.selectedInterests].slice(0, 4)
+      .map((interest) => `<span>${escapeHtml(interest)}</span>`).join("");
+    $("#profile-success").classList.remove("hidden");
+    $("#app").classList.add("profile-success-active");
+    $$(".panel").forEach((panel) => panel.classList.remove("active"));
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    trackMiniapp("profile_completed_screen", { interests: state.selectedInterests.size });
+  }
+
+  function hideProfileSuccess() {
+    state.profileJustCompleted = false;
+    $("#profile-success").classList.add("hidden");
+    $("#app").classList.remove("profile-success-active");
+  }
+
   function setTab(tab) {
+    if (state.profileJustCompleted) hideProfileSuccess();
     if (tab === "admin" && !state.data.is_admin) tab = "feed";
     if (!state.data.profile && tab !== "profile" && tab !== "admin") tab = "profile";
     state.tab = tab;
@@ -1008,9 +1078,11 @@
     if (!event) return;
     if (!$("#event-modal").classList.contains("hidden")) closeModal();
     state.companyModalEventId = event.id;
-    $("#company-modal-title").textContent = event.company_count > 0 ? "Присоединиться к компании" : "Найти компанию";
-    $("#company-modal-event").innerHTML = `<b>${escapeHtml(event.title)}</b><span>${escapeHtml(formatWhen(event.date, true))}</span><span>${escapeHtml(event.venue || event.address || "Москва")}</span>${event.company_count > 0 ? `<em>Уже ищут компанию: ${event.company_count}</em>` : ""}`;
-    $("#company-modal-confirm span").textContent = event.company_count > 0 ? "Войти в компанию" : "Начать поиск";
+    const count = Number(event.company_count || 0);
+    const available = Math.max(0, 5 - count);
+    $("#company-modal-title").textContent = count > 0 ? "Присоединиться к компании" : "Создать компанию";
+    $("#company-modal-event").innerHTML = `${sourceBadge(event)}<b>${escapeHtml(event.title)}</b><span>${escapeHtml(formatWhen(event.date, true))}</span><span>${escapeHtml(event.venue || event.address || "Москва")}</span>${count > 0 ? `<em>Уже ждут: ${count} · свободно ${available} ${available === 1 ? "место" : "места"}</em>` : "<em>Вы будете первым участником</em>"}`;
+    $("#company-modal-confirm span").textContent = count > 0 ? "Присоединиться" : "Создать и начать поиск";
     $("#company-modal").classList.remove("hidden");
     document.body.style.overflow = "hidden";
     tg?.BackButton?.show();
@@ -1027,13 +1099,63 @@
     if (state.modalEventId === null) tg?.BackButton?.hide();
   }
 
+  function openCompanySuccess(group, joinedExisting) {
+    state.companySuccessGroupId = group.id;
+    const event = group.event;
+    const count = Number(group.member_count || 1);
+    const maximum = Number(group.maximum_members || 5);
+    const ready = group.status === "active";
+    $("#company-success-title").textContent = joinedExisting ? "Готово — вы в компании!" : "Компания создана";
+    $("#company-success-copy").textContent = ready
+      ? "Людей уже достаточно. Откройте компанию, подтвердите участие и договоритесь о встрече."
+      : "Поиск участников начался. Мы уведомим в Telegram, когда присоединятся новые люди.";
+    $("#company-success-event").innerHTML = `${sourceBadge(event)}<b>${escapeHtml(event.title)}</b><span>${escapeHtml(formatWhen(event.date, true))}</span><span>${escapeHtml(event.venue || event.address || "Москва")}</span>`;
+    $("#company-success-count").textContent = `${count}/${maximum}`;
+    $("#company-success-progress").style.width = `${Math.min(100, Math.round(count * 100 / maximum))}%`;
+    $("#company-success-modal").classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+    tg?.BackButton?.show();
+    trackMiniapp("company_success_shown", { group_id: group.id, event_id: event.id, status: group.status });
+  }
+
+  function closeCompanySuccess() {
+    state.companySuccessGroupId = null;
+    $("#company-success-modal").classList.add("hidden");
+    document.body.style.overflow = "";
+    tg?.BackButton?.hide();
+  }
+
+  function openCompanyFromSuccess() {
+    const groupId = state.companySuccessGroupId;
+    if (!groupId) return;
+    trackMiniapp("company_success_opened", { group_id: groupId });
+    closeCompanySuccess();
+    openEventCompany(groupId);
+  }
+
   async function joinEventCompany() {
     const eventId = state.companyModalEventId;
     if (!eventId) return;
+    const selectedEvent = findEvent(eventId);
+    const joinedExisting = Number(selectedEvent?.company_count || 0) > 0;
     if (!tg?.initData) {
-      const preview = state.data.event_groups?.[0];
+      const previewTemplate = state.data.event_groups?.[0];
       closeCompanyModal();
-      if (preview) { state.selectedEventGroupId = preview.id; state.groupDetailOpen = true; setTab("group"); }
+      if (previewTemplate && selectedEvent) {
+        const preview = structuredClone(previewTemplate);
+        preview.id = selectedEvent.company_group_id || selectedEvent.id + 1000;
+        preview.event = selectedEvent;
+        preview.member_count = joinedExisting ? Math.min(5, Number(selectedEvent.company_count) + 1) : 1;
+        preview.status = preview.member_count >= preview.minimum_members ? "active" : "waiting";
+        preview.event.company_group_id = preview.id;
+        preview.event.company_status = preview.status;
+        const self = preview.members.find((member) => member.is_me);
+        const others = preview.members.filter((member) => !member.is_me);
+        preview.members = [...others.slice(0, Math.max(0, preview.member_count - 1)), ...(self ? [self] : [])];
+        mergeEventGroup(preview);
+        state.groupDetailOpen = true;
+        openCompanySuccess(preview, joinedExisting);
+      }
       else toast("В режиме просмотра поиск не запускается");
       return;
     }
@@ -1045,13 +1167,7 @@
       state.groupDetailOpen = true;
       closeCompanyModal();
       haptic("medium");
-      setTab("group");
-      trackMiniapp("group_details", {
-        group_id: result.event_group.id,
-        event_id: eventId,
-        status: result.event_group.status,
-      });
-      toast(result.event_group.status === "active" ? "Компания собрана" : "Поиск запущен");
+      openCompanySuccess(result.event_group, joinedExisting);
     } catch (error) { toast(error.message); }
     finally { button.disabled = false; }
   }
@@ -1245,6 +1361,12 @@
     source.classList.toggle("hidden", !event.source_url);
     source.href = event.source_url || "#";
     source.innerHTML = `${sourceBadge(event)}<span>Открыть оригинал ↗</span>`;
+    const count = Number(event.company_count || 0);
+    $("#modal-company-note").innerHTML = event.company_group_id
+      ? `<b>Вы уже в компании</b><span>Откройте её, чтобы увидеть участников и сообщения.</span>`
+      : count > 0
+        ? `<b>Компания уже собирается · ${count}/5</b><span>Присоединим вас к людям, которые выбрали именно это событие.</span>`
+        : `<b>Пока никто не собирается</b><span>Создайте компанию — мы начнём искать людей именно на это мероприятие.</span>`;
     $("#modal-actions").innerHTML = eventActions(event);
     $("#event-modal").classList.remove("hidden");
     document.body.style.overflow = "hidden";
@@ -1296,6 +1418,7 @@
 
   async function saveProfile(event) {
     event.preventDefault();
+    const wasOnboarding = !state.data.profile;
     const errorBox = $("#form-error");
     errorBox.classList.add("hidden");
     const customBudget = $("#budget-input").value.trim();
@@ -1318,25 +1441,31 @@
     const avoid = $("#avoid-input").value.split(",").map((item) => item.trim()).filter(Boolean);
     const digest = $("#digest-select").value;
     try {
-      state.data = await api("/profile", {
-        method: "PUT",
-        body: JSON.stringify({
-          interests: [...state.selectedInterests], avoid,
-          days: [...state.selectedDays], budget_rub: budget,
-          preferred_group_size_min: state.group[0], preferred_group_size_max: state.group[1],
-          digest_weekday: digest === "" ? null : Number(digest),
-        }),
-      });
+      const payload = {
+        interests: [...state.selectedInterests], avoid,
+        days: [...state.selectedDays], budget_rub: budget,
+        preferred_group_size_min: state.group[0], preferred_group_size_max: state.group[1],
+        digest_weekday: digest === "" ? null : Number(digest),
+      };
+      const isPreview = !tg?.initData && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+      if (isPreview) {
+        state.data.profile = payload;
+        state.data.digest_weekday = payload.digest_weekday;
+      } else {
+        state.data = await api("/profile", { method: "PUT", body: JSON.stringify(payload) });
+      }
       configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderGroup();
       state.profileEditorOpen = false;
-      haptic("medium"); toast("Профиль сохранён"); setTab("feed");
+      haptic("medium");
+      if (wasOnboarding) showProfileSuccess();
+      else { toast("Профиль обновлён"); setTab("profile"); }
     } catch (error) {
       errorBox.textContent = error.message;
       errorBox.classList.remove("hidden");
       trackMiniapp("profile_validation_failed", { reason: "api_error" });
     } finally {
       button.disabled = false;
-      button.querySelector("span").textContent = "Сохранить и подобрать";
+      button.querySelector("span").textContent = wasOnboarding ? "Сохранить и продолжить" : "Сохранить изменения";
     }
   }
 
@@ -1403,7 +1532,7 @@
         state.selectedEventGroupId = Number(selectCompany.dataset.selectCompany);
         state.groupDetailOpen = true;
         haptic();
-        renderGroup();
+        setTab("group");
         const group = (state.data.event_groups || []).find((item) => item.id === state.selectedEventGroupId);
         trackMiniapp("group_details", {
           group_id: state.selectedEventGroupId,
@@ -1427,6 +1556,12 @@
       if (blockMember) blockEventMember(Number(blockMember.dataset.groupId), blockMember.dataset.eventBlock);
       const avatar = event.target.closest("[data-avatar-photo]");
       if (avatar) openAvatarPreview(avatar.dataset.avatarPhoto, avatar.dataset.avatarName || "Участник");
+      const scrollChat = event.target.closest("[data-scroll-chat]");
+      if (scrollChat) {
+        haptic();
+        $(".group-chat")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        requestAnimationFrame(() => $("#group-chat-input")?.focus());
+      }
       const privacy = event.target.closest("[data-open-privacy]");
       if (privacy) openInfoPage("privacy");
       const rules = event.target.closest("[data-open-rules]");
@@ -1491,13 +1626,13 @@
       const button = event.target.closest("[data-category]"); if (!button) return;
       state.feedCategory = button.dataset.category;
       $$("[data-category]", $("#feed-filters")).forEach((chip) => chip.classList.toggle("active", chip === button));
-      haptic(); renderFeed();
+      haptic(); renderFeed(); trackMiniapp("feed_category", { category: state.feedCategory });
     });
-    $("#my-filters").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-filter]"); if (!button) return;
-      state.myFilter = button.dataset.filter;
-      $$(".filter-chip", $("#my-filters")).forEach((chip) => chip.classList.toggle("active", chip === button));
-      renderMy();
+    $("#feed-sort").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-sort]"); if (!button) return;
+      state.feedSort = button.dataset.sort;
+      $$("[data-sort]", $("#feed-sort")).forEach((chip) => chip.classList.toggle("active", chip === button));
+      haptic(); renderFeed(); trackMiniapp("feed_sort", { sort: state.feedSort });
     });
     $("#admin-periods").addEventListener("click", (event) => {
       const button = event.target.closest("[data-admin-days]");
@@ -1529,6 +1664,11 @@
     $("#company-modal-backdrop").addEventListener("click", closeCompanyModal);
     $("#company-modal-cancel").addEventListener("click", closeCompanyModal);
     $("#company-modal-confirm").addEventListener("click", joinEventCompany);
+    $("#company-success-open").addEventListener("click", openCompanyFromSuccess);
+    $("#company-success-feed").addEventListener("click", () => { trackMiniapp("company_success_returned_to_feed"); closeCompanySuccess(); });
+    $("#company-success-backdrop").addEventListener("click", closeCompanySuccess);
+    $("#profile-success-feed").addEventListener("click", () => setTab("feed"));
+    $("#retry-boot").addEventListener("click", () => void loadApplication());
     $("#avatar-preview-close").addEventListener("click", closeAvatarPreview);
     $("#avatar-preview-backdrop").addEventListener("click", closeAvatarPreview);
     $("#avatar-preview-image").addEventListener("error", () => {
@@ -1543,20 +1683,20 @@
     });
     tg?.BackButton?.onClick(() => {
       if (!$("#avatar-preview").classList.contains("hidden")) closeAvatarPreview();
+      else if (!$("#company-success-modal").classList.contains("hidden")) closeCompanySuccess();
       else if (!$("#company-modal").classList.contains("hidden")) closeCompanyModal();
       else closeModal();
     });
   }
 
-  async function boot() {
-    tg?.ready(); tg?.expand();
-    try {
-      tg?.setHeaderColor?.("secondary_bg_color");
-      tg?.setBackgroundColor?.("bg_color");
-    } catch (_) { /* old Telegram client */ }
-    bindEvents();
+  async function loadApplication() {
+    $("#launch-screen").classList.add("hidden");
+    $("#error-screen").classList.add("hidden");
+    $("#app").classList.add("hidden");
+    $("#loading").classList.remove("hidden");
     if (!tg?.initData && ["localhost", "127.0.0.1"].includes(window.location.hostname)) {
       state.data = structuredClone(LOCAL_PREVIEW);
+      if (new URLSearchParams(window.location.search).get("preview") === "onboarding") state.data.profile = null;
       configureAdminAccess(); hydrateProfileForm(); renderFeed(); renderMy(); renderProfile();
       $("#loading").classList.add("hidden");
       $("#app").classList.remove("hidden");
@@ -1584,9 +1724,19 @@
       );
     } catch (error) {
       $("#loading").classList.add("hidden");
-      $("#launch-screen").classList.remove("hidden");
-      $(".launch-copy").textContent = error.message || "Не удалось загрузить приложение. Попробуйте открыть его снова.";
+      $("#error-screen").classList.remove("hidden");
+      $("#error-message").textContent = error.message || "Не удалось загрузить приложение. Проверьте соединение и попробуйте снова.";
     }
+  }
+
+  async function boot() {
+    tg?.ready(); tg?.expand();
+    try {
+      tg?.setHeaderColor?.("secondary_bg_color");
+      tg?.setBackgroundColor?.("bg_color");
+    } catch (_) { /* old Telegram client */ }
+    bindEvents();
+    await loadApplication();
   }
 
   boot();

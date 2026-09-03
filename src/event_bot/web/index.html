@@ -9,9 +9,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260902-member-photos">
+    <link rel="stylesheet" href="/r/app/assets/styles.css?v=20260903-ux-v3">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/r/app/assets/app.js?v=20260902-member-photos" defer></script>
+    <script src="/r/app/assets/app.js?v=20260903-ux-v3" defer></script>
   </head>
   <body>
     <div id="loading" class="state-screen">
@@ -30,6 +30,15 @@
       <a class="primary-button link-button" href="https://t.me/MskMeetupBot">Открыть @MskMeetupBot</a>
     </section>
 
+    <section id="error-screen" class="state-screen error-screen hidden">
+      <div class="error-mark" aria-hidden="true">!</div>
+      <p class="eyebrow">НЕ УДАЛОСЬ ОТКРЫТЬ ПРИЛОЖЕНИЕ</p>
+      <h1>Давайте попробуем ещё раз</h1>
+      <p id="error-message">Проверьте соединение и повторите загрузку.</p>
+      <button id="retry-boot" class="primary-button link-button" type="button">Попробовать снова</button>
+      <a class="secondary-button link-button" href="https://t.me/MskMeetupBot">Открыть в Telegram</a>
+    </section>
+
     <div id="app" class="app-shell hidden">
       <header class="topbar">
         <div class="brand-lockup">
@@ -41,10 +50,32 @@
       </header>
 
       <main>
+        <section id="profile-success" class="profile-success hidden" aria-labelledby="profile-success-title">
+          <div class="success-check" aria-hidden="true">✓</div>
+          <p class="eyebrow">ВСЁ ГОТОВО</p>
+          <h1 id="profile-success-title">Профиль готов!</h1>
+          <p>Теперь выберите мероприятие — мы найдём людей, с которыми можно на него сходить.</p>
+          <div class="success-steps" aria-label="Что будет дальше">
+            <div><b>1</b><span>Выбрать<br>событие</span></div>
+            <i></i>
+            <div><b>2</b><span>Запустить<br>поиск</span></div>
+            <i></i>
+            <div><b>3</b><span>Договориться<br>с компанией</span></div>
+          </div>
+          <div class="success-interests"><span>Учтём ваши интересы</span><div id="profile-success-interests"></div></div>
+          <button id="profile-success-feed" class="primary-button" type="button"><span>Перейти к афише</span><b>→</b></button>
+        </section>
+
         <section id="feed-panel" class="panel active" data-panel="feed">
           <div class="screen-heading">
-            <h1>Афиша Москвы</h1>
-            <p>Выберите мероприятие — мы найдём людей, с которыми можно на него сходить.</p>
+            <p class="eyebrow">АФИША МОСКВЫ</p>
+            <h1>Куда пойдём?</h1>
+            <p>Выберите мероприятие — компанию найдём мы.</p>
+          </div>
+          <div id="feed-sort" class="sort-row" role="group" aria-label="Сортировка событий">
+            <button class="sort-chip active" data-sort="nearest" type="button">Ближайшие</button>
+            <button class="sort-chip" data-sort="interests" type="button">По интересам</button>
+            <button class="sort-chip" data-sort="free" type="button">Бесплатные</button>
           </div>
           <div id="feed-filters" class="filter-row event-filters" role="group" aria-label="Категории событий">
             <button class="filter-chip active" data-category="Все">Все</button>
@@ -56,14 +87,14 @@
           </div>
           <section id="company-discovery" class="company-discovery hidden">
             <div class="feed-section-title">
-              <div><span class="live-dot"></span><h2>Уже ищут компанию</h2></div>
-              <p>Присоединяйтесь к активным сборам</p>
+              <div><span class="live-dot"></span><h2>Сейчас собирают компанию</h2></div>
+              <p>Можно присоединиться — люди уже ждут</p>
             </div>
             <div id="company-event-list" class="company-event-list"></div>
           </section>
           <section id="recommendations-section">
             <div class="feed-section-title recommendations-title">
-              <div><h2>Для вас</h2></div>
+              <div><h2>Рекомендуем вам</h2></div>
               <p>По интересам, дням и бюджету</p>
             </div>
             <span id="event-count" class="count-badge hidden">0</span>
@@ -73,15 +104,18 @@
 
         <section id="my-panel" class="panel" data-panel="my">
           <div class="screen-heading">
-            <h1>Мои события</h1>
-            <p>Сохранённые и активные</p>
+            <p class="eyebrow">ВАШИ ПЛАНЫ</p>
+            <h1>Мои</h1>
+            <p>Компании и сохранённые мероприятия — отдельно и понятно.</p>
           </div>
-          <div id="my-filters" class="filter-row" role="group" aria-label="Фильтр мероприятий">
-            <button class="filter-chip active" data-filter="all">Все</button>
-            <button class="filter-chip" data-filter="going">Иду</button>
-            <button class="filter-chip" data-filter="interested">Интересно</button>
-          </div>
-          <div id="my-event-list" class="event-list"></div>
+          <section class="my-section">
+            <div class="my-section-heading"><h2>Мои компании</h2><span id="my-company-count">0</span></div>
+            <div id="my-company-list" class="company-list"></div>
+          </section>
+          <section class="my-section">
+            <div class="my-section-heading"><h2>Сохранённые мероприятия</h2><span id="my-event-count">0</span></div>
+            <div id="my-event-list" class="event-list"></div>
+          </section>
         </section>
 
         <section id="group-panel" class="panel" data-panel="group">
@@ -289,7 +323,7 @@
             <div class="form-section">
               <div class="form-title">
                 <span>04</span>
-                <div><h3>Компания</h3><p>Как комфортнее проводить время</p></div>
+                <div><h3>Размер компании</h3><p>Сколько человек комфортно видеть рядом</p></div>
               </div>
               <div id="group-chips" class="segment-grid"></div>
             </div>
@@ -337,7 +371,7 @@
 
             <p id="form-error" class="form-error hidden"></p>
             <button id="save-profile" class="primary-button" type="submit">
-              <span>Сохранить и подобрать</span><b>→</b>
+              <span>Сохранить и продолжить</span><b>→</b>
             </button>
           </form>
           </div>
@@ -347,7 +381,7 @@
       <nav id="bottom-nav" class="bottom-nav" aria-label="Основная навигация">
         <button class="nav-button active" data-tab="feed"><span><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 9h18M8 2v4M16 2v4"/><rect class="icon-fill" x="7" y="12" width="3" height="3" rx=".5"/><rect class="icon-fill" x="14" y="12" width="3" height="3" rx=".5"/></svg></span><b>Афиша</b></button>
         <button class="nav-button" data-tab="my"><span><svg viewBox="0 0 24 24"><path d="M5 3h14a1 1 0 0 1 1 1v16l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg></span><b>Мои</b></button>
-        <button class="nav-button" data-tab="group"><span><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="8" r="2.5"/><path d="M2 20c0-3.314 3.134-6 7-6s7 2.686 7 6M17 14c1.933 0 4 1.343 4 4"/></svg><i id="company-nav-dot" class="nav-dot hidden"></i></span><b>Компания</b></button>
+        <button class="nav-button" data-tab="group"><span><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="8" r="2.5"/><path d="M2 20c0-3.314 3.134-6 7-6s7 2.686 7 6M17 14c1.933 0 4 1.343 4 4"/></svg><i id="company-nav-badge" class="nav-badge hidden">0</i></span><b>Компания</b></button>
         <button class="nav-button" data-tab="profile"><span><svg viewBox="0 0 24 24"><circle cx="12" cy="7" r="4"/><path d="M4 20c0-3.314 3.582-6 8-6s8 2.686 8 6"/></svg></span><b>Профиль</b></button>
         <button id="admin-nav-button" class="nav-button hidden" data-tab="admin"><span>⌁</span><b>Аналитика</b></button>
       </nav>
@@ -366,6 +400,7 @@
           <p id="modal-description" class="modal-description"></p>
           <div id="modal-tags" class="tag-row"></div>
           <a id="modal-source" class="source-link" target="_blank" rel="noopener noreferrer">Подробнее на сайте ↗</a>
+          <div id="modal-company-note" class="modal-company-note"></div>
           <div id="modal-actions" class="card-actions modal-actions"></div>
         </div>
       </article>
@@ -384,6 +419,26 @@
           <div class="privacy-note"><span>◉</span><p><b>2–5 человек</b><br>Контакты откроются только после взаимного согласия.</p></div>
           <button id="company-modal-confirm" class="primary-button" type="button"><span>Начать поиск</span><b>→</b></button>
           <button id="company-modal-cancel" class="text-button" type="button">Отмена</button>
+        </div>
+      </article>
+    </div>
+
+    <div id="company-success-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="company-success-title">
+      <button id="company-success-backdrop" class="modal-backdrop" aria-label="Вернуться к афише"></button>
+      <article class="modal-sheet company-success-sheet">
+        <div class="modal-handle dark"></div>
+        <div class="company-success-body">
+          <span class="success-check small" aria-hidden="true">✓</span>
+          <p class="eyebrow">ПОИСК ЗАПУЩЕН</p>
+          <h2 id="company-success-title">Компания создана</h2>
+          <p id="company-success-copy">Мы уведомим в Telegram, когда присоединятся новые люди.</p>
+          <div id="company-success-event" class="company-event-summary success-event"></div>
+          <div class="success-progress">
+            <div><span>Участники</span><b id="company-success-count">1/5</b></div>
+            <div class="group-progress"><span id="company-success-progress"></span></div>
+          </div>
+          <button id="company-success-open" class="primary-button" type="button"><span>Открыть компанию</span><b>→</b></button>
+          <button id="company-success-feed" class="text-button" type="button">Вернуться к афише</button>
         </div>
       </article>
     </div>

@@ -113,6 +113,10 @@ def test_miniapp_html_is_never_cached(temp_db):
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
     assert response.headers["pragma"] == "no-cache"
     assert "avatar-preview" in response.text
+    assert "profile-success" in response.text
+    assert "feed-sort" in response.text
+    assert "company-success-modal" in response.text
+    assert "company-nav-badge" in response.text
 
 
 @pytest.mark.asyncio
