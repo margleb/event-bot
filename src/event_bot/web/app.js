@@ -372,6 +372,18 @@
       </button>`;
   }
 
+  function participantCountLabel(count) {
+    const normalized = Math.max(0, Number(count) || 0);
+    const lastTwo = normalized % 100;
+    const last = normalized % 10;
+    const noun = lastTwo >= 11 && lastTwo <= 14
+      ? "участников"
+      : last >= 1 && last <= 4
+        ? "участника"
+        : "участников";
+    return `${normalized} ${noun}`;
+  }
+
   function companyDiscoveryCard(event) {
     const count = Number(event.company_count || 0);
     const remaining = Math.max(0, 5 - count);
@@ -379,7 +391,7 @@
       <article class="company-discovery-card">
         <button class="discovery-image" type="button" data-open="${event.id}" style="background-image:url('${escapeHtml(eventImage(event))}')" aria-label="Подробнее о мероприятии">
           <span class="image-shade"></span>${sourceBadge(event)}
-          <span class="social-badges"><strong><i></i>Ищут: ${count}</strong><em>${remaining ? `Осталось ${remaining} ${remaining === 1 ? "место" : "места"}` : "Мест нет"}</em></span>
+          <span class="social-badges"><strong><i></i>В компании: ${count}/5</strong><em>${remaining ? `Ищем ещё ${participantCountLabel(remaining)}` : "Компания собрана"}</em></span>
         </button>
         <div class="discovery-copy">
           <button type="button" data-open="${event.id}">${escapeHtml(event.title)}</button>
@@ -1081,7 +1093,7 @@
     const count = Number(event.company_count || 0);
     const available = Math.max(0, 5 - count);
     $("#company-modal-title").textContent = count > 0 ? "Присоединиться к компании" : "Создать компанию";
-    $("#company-modal-event").innerHTML = `${sourceBadge(event)}<b>${escapeHtml(event.title)}</b><span>${escapeHtml(formatWhen(event.date, true))}</span><span>${escapeHtml(event.venue || event.address || "Москва")}</span>${count > 0 ? `<em>Уже ждут: ${count} · свободно ${available} ${available === 1 ? "место" : "места"}</em>` : "<em>Вы будете первым участником</em>"}`;
+    $("#company-modal-event").innerHTML = `${sourceBadge(event)}<b>${escapeHtml(event.title)}</b><span>${escapeHtml(formatWhen(event.date, true))}</span><span>${escapeHtml(event.venue || event.address || "Москва")}</span>${count > 0 ? `<em>В компании: ${count}/5 · ${available ? `ищем ещё ${participantCountLabel(available)}` : "компания собрана"}</em>` : "<em>Вы будете первым участником</em>"}`;
     $("#company-modal-confirm span").textContent = count > 0 ? "Присоединиться" : "Создать и начать поиск";
     $("#company-modal").classList.remove("hidden");
     document.body.style.overflow = "hidden";
