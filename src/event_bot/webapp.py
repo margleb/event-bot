@@ -42,6 +42,7 @@ from event_bot.db import (
     delete_user_data,
     find_events,
     find_events_with_open_companies,
+    get_active_audience_size,
     get_digest_schedule,
     get_event,
     get_event_company_counts,
@@ -55,6 +56,7 @@ from event_bot.db import (
     init_db,
     join_event_group,
     leave_event_group,
+    prioritize_events_by_demand,
     reject_connection_request,
     save_intent,
     save_user_profile,
@@ -102,6 +104,24 @@ from event_bot.web_schemas import (
 BASE_PATH = "/r"
 STATIC_DIR = Path(__file__).resolve().parent / "web"
 logger = logging.getLogger(__name__)
+
+FEED_AUDIENCE_WINDOW_DAYS = 7
+FEED_LIMIT_TIERS = (
+    (50, 6),
+    (150, 8),
+    (350, 12),
+    (750, 16),
+)
+FEED_MAX_RECOMMENDATIONS = 20
+
+
+def _adaptive_recommendation_limit(active_users: int) -> int:
+    """Расширяет выбор только когда аудитории хватает для общих компаний."""
+    audience = max(0, int(active_users))
+    for ceiling, limit in FEED_LIMIT_TIERS:
+        if audience < ceiling:
+            return limit
+    return FEED_MAX_RECOMMENDATIONS
 
 
 
@@ -296,6 +316,11 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
     intents = get_user_intents(user.id) if profile is not None else []
     intents_by_event = {intent.event.id: intent for intent in intents}
     recommendations: list[Event] = []
+    active_audience = get_active_audience_size(
+        days=FEED_AUDIENCE_WINDOW_DAYS,
+        excluded_user_ids=set(get_admin_ids()),
+    )
+    recommendation_limit = _adaptive_recommendation_limit(active_audience)
     if profile is not None:
         embeddings = get_user_profile_embeddings(user.id)
         recommendations = find_events(
@@ -304,8 +329,12 @@ def _bootstrap(user: TelegramUser) -> dict[str, object]:
             profile_embedding_model=embeddings[1],
             avoid_embedding=embeddings[2],
             avoid_embedding_model=embeddings[3],
-            limit=20,
+            limit=max(20, recommendation_limit * 3),
         )
+        recommendations = prioritize_events_by_demand(
+            recommendations,
+            excluded_user_ids=set(get_admin_ids()),
+        )[:recommendation_limit]
     raw_event_groups = get_user_event_groups(user.id) if profile is not None else []
     event_groups = [
         payload

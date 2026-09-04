@@ -44,6 +44,11 @@ MAX_COMPANIONS = 5
 # Не больше пяти новых запросов за скользящие 24 часа.
 DAILY_REQUEST_LIMIT = 5
 
+# Социальный сигнал не должен полностью вытеснять персональную релевантность:
+# один реальный интерес поднимает событие на две позиции, максимум на восемь.
+EVENT_DEMAND_RANK_BOOST = 2
+EVENT_DEMAND_BOOST_CAP = 4
+
 # Статусы, при которых человек считается участником события:
 # только они попадают в список «Кто идёт»
 PARTICIPATING_STATUSES = ("interested", "going")
@@ -105,6 +110,33 @@ def get_connection(db_path=None):
 def init_db() -> None:
     """Initialize the current schema at the configured database path."""
     init_schema(DB_PATH)
+
+
+def get_active_audience_size(
+    *,
+    days: int = 7,
+    excluded_user_ids: set[int] | None = None,
+) -> int:
+    """Количество реальных активных пользователей для размера общей афиши."""
+    window_days = max(1, min(int(days), 90))
+    excluded = sorted(excluded_user_ids or set())
+    excluded_sql = (
+        f" AND user_id NOT IN ({','.join('?' for _ in excluded)})"
+        if excluded
+        else ""
+    )
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT user_id) AS amount
+            FROM usage_events
+            WHERE created_at >= datetime('now', ?)
+              AND user_id NOT IN (SELECT user_id FROM research_participants)
+            """
+            + excluded_sql,
+            (f"-{window_days} days", *excluded),
+        ).fetchone()
+    return int(row["amount"] or 0)
 
 
 
@@ -678,6 +710,56 @@ def find_events(
     # используем прежний алгоритм и не оставляем пользователя без результата.
     fallback = _rank_by_tags([event for event, _ in candidates], profile)
     return fallback[:limit]
+
+
+def prioritize_events_by_demand(
+    events: list[Event],
+    *,
+    excluded_user_ids: set[int] | None = None,
+) -> list[Event]:
+    """Мягко поднимает уже выбранные события, сохраняя личную релевантность."""
+    event_ids = [event.id for event in events if event.id is not None]
+    if len(event_ids) < 2:
+        return list(events)
+
+    excluded = sorted(excluded_user_ids or set())
+    event_placeholders = ",".join("?" for _ in event_ids)
+    excluded_sql = (
+        f" AND user_id NOT IN ({','.join('?' for _ in excluded)})"
+        if excluded
+        else ""
+    )
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT event_id, COUNT(DISTINCT user_id) AS demand
+            FROM intents
+            WHERE event_id IN ({event_placeholders})
+              AND status IN ('interested', 'going')
+              AND user_id NOT IN (SELECT user_id FROM research_participants)
+              {excluded_sql}
+            GROUP BY event_id
+            """,
+            (*event_ids, *excluded),
+        ).fetchall()
+    demand_by_event = {
+        int(row["event_id"]): min(int(row["demand"]), EVENT_DEMAND_BOOST_CAP)
+        for row in rows
+    }
+
+    ranked = list(enumerate(events))
+    ranked.sort(
+        key=lambda item: (
+            max(
+                0,
+                item[0]
+                - EVENT_DEMAND_RANK_BOOST
+                * demand_by_event.get(item[1].id or 0, 0),
+            ),
+            item[0],
+        )
+    )
+    return [event for _rank, event in ranked]
 
 
 def get_event(event_id: int) -> Event | None:
