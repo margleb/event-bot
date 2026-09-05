@@ -60,7 +60,7 @@ async def dispatch_event_group_notifications(
                 else:
                     await bot.send_message(
                         user_id,
-                        "Как прошла встреча на мероприятии «"
+                        "Удалось сходить на мероприятие «"
                         f"{escape(str(item['title']))}»?",
                         parse_mode=ParseMode.HTML,
                         reply_markup=event_experience_keyboard(group_id),

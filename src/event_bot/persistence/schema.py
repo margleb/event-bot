@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS event_experience_feedback (
     group_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     outcome TEXT NOT NULL,
+    detail TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (group_id, user_id)
 );
@@ -227,6 +228,9 @@ CREATE TABLE IF NOT EXISTS source_sync_runs (
 
 
 ADDITIVE_COLUMNS = {
+    "event_experience_feedback": {
+        "detail": "TEXT",
+    },
     "users": {
         "name": "TEXT NOT NULL DEFAULT ''",
         "username": "TEXT",

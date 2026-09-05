@@ -5,6 +5,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 # по ней в handlers.py находится нужный обработчик.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
+from event_bot.event_experience import (
+    ATTENDANCE_LABELS,
+    DETAIL_LABELS,
+    DETAILS_BY_OUTCOME,
+)
+
 
 def miniapp_keyboard(
     url: str,
@@ -112,20 +118,25 @@ def inactivity_feedback_keyboard() -> InlineKeyboardMarkup:
 
 
 def event_experience_keyboard(group_id: int) -> InlineKeyboardMarkup:
-    """Одноразовый опрос после мероприятия — без текста и личных данных."""
+    """Сначала выясняем факт посещения, не предполагая, что встреча была."""
     prefix = f"event_experience:{group_id}:"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🤝 Встретились", callback_data=prefix + "met"),
-                InlineKeyboardButton(text="👤 Сходил(а) один", callback_data=prefix + "solo"),
-            ],
-            [
-                InlineKeyboardButton(text="⏳ Никто не пришёл", callback_data=prefix + "no_show"),
-                InlineKeyboardButton(text="⚠️ Было некомфортно", callback_data=prefix + "unsafe"),
-            ],
+            [InlineKeyboardButton(text=f"{icon} {ATTENDANCE_LABELS[code]}", callback_data=prefix + code)]
+            for code, icon in (("met", "🤝"), ("solo", "👤"), ("not_attended", "❌"))
         ]
     )
+
+
+def event_experience_detail_keyboard(group_id: int, outcome: str) -> InlineKeyboardMarkup:
+    """Необязательное уточнение; основной ответ уже сохранён."""
+    prefix = f"event_detail:{group_id}:{outcome}:"
+    rows = [
+        [InlineKeyboardButton(text=DETAIL_LABELS[code], callback_data=prefix + code)]
+        for code in DETAILS_BY_OUTCOME[outcome]
+    ]
+    rows.append([InlineKeyboardButton(text="Пропустить", callback_data=prefix + "skip")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def people_button(event_id: int) -> InlineKeyboardButton:

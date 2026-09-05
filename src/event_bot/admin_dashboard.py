@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from event_bot.analytics import EVENT_LABELS, get_admin_ids
 from event_bot.db import DB_DATETIME_FORMAT, get_connection
+from event_bot.event_experience import DETAIL_LABELS, OUTCOME_LABELS
 from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
 from event_bot.research_analytics import list_research_campaigns
 
@@ -359,17 +360,34 @@ def build_admin_dashboard(
             """,
             (start_text, end_text, *admin_ids),
         ).fetchall()
-        experience_rows = conn.execute(
-            """
-            SELECT feedback.outcome, COUNT(*) AS amount
+        experience_admin_clause = (
+            f" AND feedback.user_id NOT IN ({','.join('?' for _ in admin_ids)})"
+            if admin_ids else ""
+        )
+        experience_filter = """
             FROM event_experience_feedback feedback
             JOIN event_groups eg ON eg.id = feedback.group_id
             WHERE feedback.created_at >= ? AND feedback.created_at < ?
               AND eg.research_campaign IS NULL
+              AND feedback.user_id NOT IN (SELECT user_id FROM research_participants)
+            """ + experience_admin_clause
+        experience_rows = conn.execute(
+            """
+            SELECT feedback.outcome, COUNT(*) AS amount
+            """ + experience_filter + """
             GROUP BY outcome
             ORDER BY amount DESC, outcome
             """,
-            (start_text, end_text),
+            (start_text, end_text, *admin_ids),
+        ).fetchall()
+        experience_detail_rows = conn.execute(
+            "SELECT feedback.outcome, feedback.detail, COUNT(*) AS amount "
+            + experience_filter + """
+              AND feedback.detail IS NOT NULL
+            GROUP BY outcome, detail
+            ORDER BY amount DESC, outcome, detail
+            """,
+            (start_text, end_text, *admin_ids),
         ).fetchall()
         reports = conn.execute(
             """
@@ -453,12 +471,6 @@ def build_admin_dashboard(
         ("connected", "Обменялись контактами"),
     )
     funnel_total = int(funnel["discovered"] or 0)
-    experience_labels = {
-        "met": "Встретились",
-        "solo": "Сходили одни",
-        "no_show": "Никто не пришёл",
-        "unsafe": "Было некомфортно",
-    }
     stale_before = current.astimezone(timezone.utc).replace(tzinfo=None) - timedelta(hours=36)
     source_health = []
     for row in source_health_rows:
@@ -584,10 +596,22 @@ def build_admin_dashboard(
         "company_outcomes": [
             {
                 "outcome": row["outcome"],
-                "label": experience_labels.get(row["outcome"], row["outcome"]),
+                "label": OUTCOME_LABELS.get(row["outcome"], row["outcome"]),
                 "amount": int(row["amount"]),
             }
             for row in experience_rows
+        ],
+        "company_outcome_details": [
+            {
+                "outcome": row["outcome"],
+                "detail": row["detail"],
+                "label": (
+                    f"{OUTCOME_LABELS.get(row['outcome'], row['outcome'])} · "
+                    f"{DETAIL_LABELS.get(row['detail'], row['detail'])}"
+                ),
+                "amount": int(row["amount"]),
+            }
+            for row in experience_detail_rows
         ],
         "reports": {
             "total": int(reports["total"] or 0),

@@ -47,16 +47,24 @@ from event_bot.db import (
     suspend_user,
     save_inactivity_feedback_response,
     save_event_experience_feedback,
+    save_event_experience_detail,
     save_intent,
     set_digest_schedule,
     set_intent_visibility,
     update_user_identity,
 )
 from event_bot.digest import DIGEST_WEEKDAY_LABELS
+from event_bot.event_experience import (
+    ATTENDANCE_LABELS,
+    DETAIL_LABELS,
+    FOLLOWUP_QUESTIONS,
+    OUTCOME_LABELS,
+)
 from event_bot.inactivity_feedback import INACTIVITY_FEEDBACK_LABELS
 from event_bot.research_analytics import enroll_research_participant
 from event_bot.keyboards import (
     companion_keyboard,
+    event_experience_detail_keyboard,
     feedback_cancel_keyboard,
     intent_card_keyboard,
     main_menu_keyboard,
@@ -574,13 +582,43 @@ async def handle_event_experience(callback: CallbackQuery) -> None:
     if not saved:
         await callback.answer("Ответ не сохранён", show_alert=True)
         return
-    if isinstance(callback.message, Message):
-        await callback.message.edit_reply_markup(reply_markup=None)
-        text = "Спасибо, это поможет улучшить подбор компаний."
-        if parts[2] == "unsafe":
-            text += " Если нужен ответ команды, напишите /feedback."
-        await callback.message.answer(text)
     await callback.answer("Ответ сохранён")
+    if isinstance(callback.message, Message):
+        outcome = parts[2]
+        question = (callback.message.text or "Опрос после мероприятия").split("\n\n", 1)[0]
+        label = ATTENDANCE_LABELS.get(outcome, OUTCOME_LABELS[outcome])
+        text = f"{escape(question)}\n\nОтвет сохранён: {escape(label)}."
+        keyboard = None
+        if outcome in FOLLOWUP_QUESTIONS:
+            text += f"\n\n{FOLLOWUP_QUESTIONS[outcome]} Ответ необязателен."
+            keyboard = event_experience_detail_keyboard(int(parts[1]), outcome)
+        else:
+            text += "\nСпасибо!"
+            if outcome == "unsafe":
+                text += " Если нужен ответ команды, напишите /feedback."
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("event_detail:"))
+async def handle_event_experience_detail(callback: CallbackQuery) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4 or not parts[1].isdigit():
+        await callback.answer()
+        return
+    _, group_id, outcome, detail = parts
+    if not save_event_experience_detail(int(group_id), callback.from_user.id, outcome, detail):
+        await callback.answer("Этот вопрос уже неактуален", show_alert=True)
+        return
+    await callback.answer("Спасибо!")
+    if isinstance(callback.message, Message):
+        question = (callback.message.text or "Опрос после мероприятия").split("\n\n", 1)[0]
+        text = f"{escape(question)}\n\nОтвет сохранён: {ATTENDANCE_LABELS[outcome]}."
+        if detail != "skip":
+            text += f"\nУточнение: {DETAIL_LABELS[detail]}."
+        text += "\n\nСпасибо!"
+        if detail == "unsafe":
+            text += " Если нужен ответ команды, напишите /feedback."
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=None)
 
 
 def _parse_event_callback(data: str | None) -> tuple[str, int] | None:

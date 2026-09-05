@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from event_bot.embedding_provider import vector_from_blob
+from event_bot.event_experience import DETAILS_BY_OUTCOME, OUTCOME_LABELS
 from event_bot.models import (
     Companion,
     ConnectionRequest,
@@ -1387,7 +1388,7 @@ def create_event_group_message(
         return "created", member_ids
 
 
-EVENT_EXPERIENCE_OUTCOMES = {"met", "no_show", "solo", "unsafe"}
+EVENT_EXPERIENCE_OUTCOMES = set(OUTCOME_LABELS)
 EVENT_GROUP_DELIVERY_KINDS = {"reminder_24h", "experience_prompt"}
 
 
@@ -1516,10 +1517,45 @@ def save_event_experience_feedback(
             INSERT INTO event_experience_feedback (group_id, user_id, outcome)
             VALUES (?, ?, ?)
             ON CONFLICT(group_id, user_id) DO UPDATE SET
-                outcome = excluded.outcome, created_at = datetime('now')
+                outcome = excluded.outcome, detail = NULL, created_at = datetime('now')
+            WHERE event_experience_feedback.outcome != excluded.outcome
             """,
             (group_id, user_id, outcome),
         )
+        return True
+
+
+def save_event_experience_detail(
+    group_id: int,
+    user_id: int,
+    outcome: str,
+    detail: str,
+) -> bool:
+    """Дополняет, но не заменяет посещение; отклоняет чужие и устаревшие кнопки."""
+    if outcome not in DETAILS_BY_OUTCOME:
+        return False
+    if detail != "skip" and detail not in DETAILS_BY_OUTCOME[outcome]:
+        return False
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM event_experience_feedback feedback
+            JOIN event_group_members gm
+              ON gm.group_id = feedback.group_id AND gm.user_id = feedback.user_id
+            WHERE feedback.group_id = ? AND feedback.user_id = ? AND feedback.outcome = ?
+            """,
+            (group_id, user_id, outcome),
+        ).fetchone()
+        if row is None:
+            return False
+        if detail != "skip":
+            conn.execute(
+                """
+                UPDATE event_experience_feedback SET detail = ?
+                WHERE group_id = ? AND user_id = ? AND outcome = ?
+                """,
+                (detail, group_id, user_id, outcome),
+            )
         return True
 
 

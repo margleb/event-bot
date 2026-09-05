@@ -70,7 +70,7 @@ async def test_company_reminder_and_experience_prompt_are_sent_once(
     assert await dispatch_event_group_notifications(bot, now=after) == 2
     assert await dispatch_event_group_notifications(bot, now=after) == 0
     assert bot.send_message.await_count == 4
-    assert "Как прошла встреча" in bot.send_message.await_args_list[2].args[1]
+    assert "Удалось сходить на мероприятие" in bot.send_message.await_args_list[2].args[1]
     assert db.save_event_experience_feedback(group_id, first, "met")
 
 

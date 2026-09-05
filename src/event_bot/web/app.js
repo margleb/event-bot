@@ -942,6 +942,11 @@
     $("#admin-company-outcomes").innerHTML = outcomes.length
       ? outcomes.map((item) => analyticsBar(item.label, item.amount, outcomeMax, "ответов")).join("")
       : `<div class="analytics-empty">Ответы появятся после завершённых мероприятий.</div>`;
+    const outcomeDetails = data.company_outcome_details || [];
+    const detailMax = Math.max(1, ...outcomeDetails.map((item) => item.amount));
+    $("#admin-company-outcome-details").innerHTML = outcomeDetails.length
+      ? outcomeDetails.map((item) => analyticsBar(item.label, item.amount, detailMax, "ответов")).join("")
+      : `<div class="analytics-empty">Уточнения необязательны. Отсутствие ответа не означает, что всё прошло хорошо.</div>`;
     const reports = data.reports || { total: 0, new: 0 };
     $("#admin-reports").textContent = `${formatNumber(reports.total)} жалоб · ${formatNumber(reports.new)} новых`;
     const sourceHealthLabels = { success: "в норме", warning: "есть ошибки", failed: "сбой", stale: "давно не обновлялся", unknown: "нет данных" };
