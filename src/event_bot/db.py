@@ -180,6 +180,9 @@ def get_inactive_feedback_user_ids(
               AND activity.user_id NOT IN (
                   SELECT user_id FROM research_participants
               )
+              AND activity.user_id NOT IN (
+                  SELECT user_id FROM pilot_feedback_outreach
+              )
             """
             + excluded_sql
             + """
@@ -2549,6 +2552,7 @@ def delete_user_data(user_id: int) -> bool:
         conn.execute("DELETE FROM usage_events WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM feedback_messages WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM inactivity_feedback_prompts WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM pilot_feedback_outreach WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM event_group_deliveries WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM event_experience_feedback WHERE user_id = ?", (user_id,))
         conn.execute(

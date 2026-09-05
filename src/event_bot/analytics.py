@@ -192,8 +192,9 @@ def create_feedback(
     source: str,
 ) -> FeedbackItem:
     text = " ".join(message.strip().split())
-    if not 3 <= len(text) <= 2000:
-        raise ValueError("Сообщение должно содержать от 3 до 2000 символов")
+    minimum = 1 if source.startswith("pilot:") else 3
+    if not minimum <= len(text) <= 2000:
+        raise ValueError(f"Сообщение должно содержать от {minimum} до 2000 символов")
     with get_connection() as conn:
         cursor = conn.execute(
             """

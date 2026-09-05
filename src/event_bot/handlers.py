@@ -75,6 +75,7 @@ from event_bot.keyboards import (
     visibility_keyboard,
 )
 from event_bot.models import Profile
+from event_bot.pilot_feedback import reply_source as pilot_reply_source
 
 
 # Router — контейнер обработчиков, в app.py его подключают к Dispatcher.
@@ -446,8 +447,16 @@ async def cancel_feedback(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Отменено")
 
 
+def pilot_feedback_reply(message: Message) -> dict | bool:
+    if message.from_user is None or message.reply_to_message is None:
+        return False
+    source = pilot_reply_source(message.from_user.id, message.reply_to_message.message_id)
+    return {"feedback_source": source} if source else False
+
+
 @router.message(FeedbackFlow.waiting_message, F.text)
-async def receive_feedback(message: Message, state: FSMContext) -> None:
+@router.message(F.text, pilot_feedback_reply)
+async def receive_feedback(message: Message, state: FSMContext, feedback_source: str = "bot") -> None:
     if message.text is None or message.from_user is None:
         return
     try:
@@ -456,7 +465,7 @@ async def receive_feedback(message: Message, state: FSMContext) -> None:
             message.from_user.first_name,
             message.from_user.username,
             message.text,
-            "bot",
+            feedback_source,
         )
     except ValueError as error:
         await message.answer(

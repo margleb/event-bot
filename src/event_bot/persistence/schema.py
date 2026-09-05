@@ -191,6 +191,17 @@ CREATE TABLE IF NOT EXISTS user_acquisition (
     first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS pilot_feedback_outreach (
+    campaign TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    segment TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    message_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    sent_at TEXT,
+    PRIMARY KEY (campaign, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS research_participants (
     campaign TEXT NOT NULL,
     user_id INTEGER NOT NULL,
